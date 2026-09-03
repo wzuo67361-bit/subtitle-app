@@ -9,25 +9,36 @@ import re
 # --- 页面配置 ---
 st.set_page_config(page_title="音视频字幕生成与翻译", page_icon="🎬", layout="wide")
 st.title("🎬 音视频字幕生成与翻译 Web 应用")
+st.markdown("支持提取原字幕、多语言翻译、双语对照，以及智能语气还原。")
 
 # --- 侧边栏配置区 ---
 st.sidebar.header("⚙️ 选项配置")
 
-# 1. API 配置
-st.sidebar.subheader("API 设置")
-api_provider = st.sidebar.radio("选择大模型提供商", ["OpenAI", "DeepSeek"])
-api_key = st.sidebar.text_input("输入 API Key", type="password", placeholder="sk-...")
-if api_provider == "DeepSeek":
+# 1. API 配置 (支持万能接入)
+st.sidebar.subheader("1. API 设置 (翻译大脑)")
+api_provider = st.sidebar.radio(
+    "选择大模型提供商", 
+    ["DeepSeek (推荐)", "OpenAI", "自定义 (支持任意兼容平台)"]
+)
+
+if api_provider == "DeepSeek (推荐)":
     base_url = "https://api.deepseek.com/v1"
     model_name = "deepseek-chat"
-else:
+    api_key = st.sidebar.text_input("输入 DeepSeek API Key (sk-...)", type="password")
+elif api_provider == "OpenAI":
     base_url = "https://api.openai.com/v1"
-    model_name = "gpt-4o-mini" # 默认使用高性价比模型
+    model_name = "gpt-4o-mini"
+    api_key = st.sidebar.text_input("输入 OpenAI API Key (sk-...)", type="password")
+else:
+    st.sidebar.info("💡 可接入阿里、Kimi、硅基流动或第三方代理")
+    base_url = st.sidebar.text_input("API 网址 (Base URL)", placeholder="例如: https://api.siliconflow.cn/v1")
+    model_name = st.sidebar.text_input("模型名称 (Model)", placeholder="例如: Qwen/Qwen2.5-7B-Instruct")
+    api_key = st.sidebar.text_input("输入你的 API Key", type="password")
 
 # 2. 语言与字幕选项
-st.sidebar.subheader("字幕设置")
+st.sidebar.subheader("2. 字幕设置")
 source_lang = st.sidebar.selectbox(
-    "源语言", 
+    "视频源语言", 
     ["ja (日语)", "auto (自动识别)", "en (英语)", "zh (中文)"], 
     index=0
 )
@@ -44,7 +55,7 @@ target_option = st.sidebar.selectbox(
 )
 
 # 3. 专业词汇校正
-st.sidebar.subheader("专业词汇/专有名词校正")
+st.sidebar.subheader("3. 专业词汇/专有名词校正")
 glossary = st.sidebar.text_area(
     "输入翻译对照（如：人名、术语），每行一个",
     placeholder="例如：\n山田太郎 -> Yamada Taro\n术语A -> Term A",
@@ -66,19 +77,23 @@ def format_timestamp(seconds: float):
 @st.cache_resource
 def load_whisper_model():
     """加载 faster-whisper 模型 (使用 base 模型以适应免费云端资源)"""
-    # 在 CPU 环境下使用 int8，如果在有 GPU 的环境可改为 device="cuda", compute_type="float16"
     return WhisperModel("base", device="cpu", compute_type="int8")
 
 def translate_srt_chunk(srt_chunk, target_opt, gloss, client, model):
-    """调用 LLM 翻译 SRT 文本块"""
-    system_prompt = f"""你是一个专业的字幕翻译专家。请严格按照要求翻译以下 SRT 字幕。
+    """调用 LLM 翻译 SRT 文本块，并加入智能角色推断"""
+    system_prompt = f"""你是一个顶级的影视字幕翻译专家。请严格按照要求翻译以下 SRT 字幕。
 目标要求：{target_opt}
 专业词汇表：\n{gloss}
 
-【严格规则】：
+【核心翻译原则 - 智能角色与语气还原】：
+1. 请根据原文（特别是日语中的自称如俺/僕/私，句尾语气词如わ/ぜ/ぞ，以及敬语/口语的使用）智能推断说话人的性别（男/女）、身份或情绪。
+2. 翻译出的译文必须极其精准地符合该角色的语气！男性的台词要符合男性口吻，女性的台词要符合女性口吻。
+3. 如果对话中明显有不同角色在交替说话，请在译文的自然表达中体现出差异，不要翻译成干巴巴的机器味。
+
+【严格排版规则】：
 1. 必须严格保留原有的 SRT 序号和时间轴（如 1 \n 00:00:01,000 --> 00:00:04,000）。
 2. 如果要求双语，请将原文放在第一行，译文放在第二行。
-3. 不要输出任何 Markdown 标记（如 ```srt），直接输出纯文本。
+3. 绝对不要输出任何 Markdown 标记（如 ```srt），直接输出纯文本。
 4. 不要合并或删除任何时间轴。"""
 
     try:
@@ -100,16 +115,17 @@ def translate_srt_chunk(srt_chunk, target_opt, gloss, client, model):
 
 # --- 主界面逻辑 ---
 
-uploaded_file = st.file_uploader("上传音视频文件 (支持 MP4, MP3, WAV, M4A)", type=['mp4', 'mp3', 'wav', 'm4a'])
+st.write("### 📤 第一步：上传文件")
+uploaded_file = st.file_uploader("支持 MP4, MP3, WAV, M4A 等格式", type=['mp4', 'mp3', 'wav', 'm4a'])
 
-if st.button("🚀 开始处理", type="primary"):
+if st.button("🚀 开始生成与翻译", type="primary", use_container_width=True):
     if not uploaded_file:
-        st.warning("请先上传文件！")
+        st.warning("⚠️ 请先上传音视频文件！")
         st.stop()
     
     if "翻译" in target_option or "双语" in target_option:
-        if not api_key:
-            st.warning("请在左侧输入 API Key 以进行翻译！")
+        if not api_key or not base_url or not model_name:
+            st.warning("⚠️ 请在左侧完整填写 API 网址、模型名称和 API Key！")
             st.stop()
 
     # 1. 保存上传的文件到临时目录
@@ -119,11 +135,12 @@ if st.button("🚀 开始处理", type="primary"):
 
     try:
         # 进度显示
+        st.write("### ⏳ 第二步：处理进度")
         progress_bar = st.progress(0)
         status_text = st.empty()
 
         # 2. 语音识别 (Whisper)
-        status_text.info("⏳ 正在提取语音并生成原字幕 (这可能需要几分钟)...")
+        status_text.info("🎧 正在提取语音并生成原字幕 (这可能需要几分钟，请耐心等待)...")
         model = load_whisper_model()
         
         lang_code = source_lang.split(" ")[0]
@@ -147,7 +164,7 @@ if st.button("🚀 开始处理", type="primary"):
         final_srt_text = original_srt_text
         
         if "翻译" in target_option or "双语" in target_option:
-            status_text.info(f"⏳ 正在调用 {api_provider} API 进行翻译...")
+            status_text.info(f"🧠 正在调用 AI ({model_name}) 进行智能翻译与语气还原...")
             client = OpenAI(api_key=api_key, base_url=base_url)
             
             # 将字幕分块（每 40 个字幕块请求一次，防止超出 LLM 上下文或被截断）
@@ -160,8 +177,14 @@ if st.button("🚀 开始处理", type="primary"):
                 chunk_lines = original_srt_lines[i*chunk_size : (i+1)*chunk_size]
                 chunk_text = "\n".join(chunk_lines)
                 
-                status_text.info(f"⏳ 正在翻译第 {i+1}/{total_chunks} 部分...")
+                status_text.info(f"🧠 正在翻译第 {i+1}/{total_chunks} 部分 (AI 正在分析角色语气)...")
                 translated_chunk = translate_srt_chunk(chunk_text, target_option, glossary, client, model_name)
+                
+                # 如果报错，直接停止并显示错误
+                if "翻译出错" in translated_chunk:
+                    st.error(translated_chunk)
+                    st.stop()
+                    
                 translated_srt_pieces.append(translated_chunk)
                 
                 # 更新进度条 (50% 到 100%)
@@ -172,23 +195,27 @@ if st.button("🚀 开始处理", type="primary"):
         else:
             progress_bar.progress(100)
 
-        status_text.success("✅ 处理完成！")
+        status_text.success("✅ 处理完成！请在下方预览并下载字幕。")
 
         # 4. 结果展示与下载
-        st.subheader("📝 字幕预览")
-        st.text_area("SRT 内容", final_srt_text, height=300)
+        st.write("---")
+        st.write("### 👀 第三步：字幕预览与下载")
+        
+        # 超大预览框
+        st.text_area("你可以直接在这里检查、修改生成的字幕内容：", final_srt_text, height=400)
         
         # 下载按钮
         st.download_button(
-            label="⬇️ 一键下载 .srt 字幕文件",
+            label="⬇️ 确认无误，一键下载 .srt 字幕文件",
             data=final_srt_text,
             file_name=f"{os.path.splitext(uploaded_file.name)[0]}_subtitle.srt",
             mime="text/plain",
-            type="primary"
+            type="primary",
+            use_container_width=True
         )
 
     except Exception as e:
-        st.error(f"处理过程中发生错误: {str(e)}")
+        st.error(f"❌ 处理过程中发生错误: {str(e)}")
     finally:
         # 清理临时文件
         if os.path.exists(tmp_file_path):
