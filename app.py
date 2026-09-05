@@ -14,11 +14,15 @@ st.markdown("支持提取原字幕、多语言翻译、双语对照，以及智�
 # --- 侧边栏配置区 ---
 st.sidebar.header("⚙️ 选项配置")
 
-# 1. API 配置 (预设主流平台)
+# 1. API 配置 (全网通吃版)
 st.sidebar.subheader("1. API 设置 (翻译大脑)")
 
-# 预设市面上主流且兼容 OpenAI 格式的平台
+# 预设市面上主流平台（全部使用 OpenAI 兼容接口）
 api_presets = {
+    "Google Gemini": {
+        "url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "model": "gemini-1.5-flash"
+    },
     "DeepSeek (推荐, 极便宜)": {
         "url": "https://api.deepseek.com/v1",
         "model": "deepseek-chat"
@@ -30,10 +34,6 @@ api_presets = {
     "Kimi (月之暗面)": {
         "url": "https://api.moonshot.cn/v1",
         "model": "moonshot-v1-8k"
-    },
-    "智谱 GLM": {
-        "url": "https://open.bigmodel.cn/api/paas/v4",
-        "model": "glm-4-flash"
     },
     "OpenAI 官方": {
         "url": "https://api.openai.com/v1",
@@ -150,7 +150,7 @@ if st.button("🚀 开始生成与翻译", type="primary", use_container_width=T
     
     if "翻译" in target_option or "双语" in target_option:
         if not api_key or not base_url or not model_name:
-            st.warning("⚠️ 请在左侧完整填写 API Key（如果是自定义平台，还需填写网址和模型）！")
+            st.warning("⚠️ 请在左侧完整填写 API Key！")
             st.stop()
 
     # 1. 保存上传的文件到临时目录
