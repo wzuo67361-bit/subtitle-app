@@ -15,11 +15,12 @@ st.markdown("支持提取原字幕、多语言翻译、双语对照。")
 # --- 侧边栏配置区 ---
 st.sidebar.header("⚙️ 选项配置")
 
-# 1. 翻译引擎选择 (核心升级)
+# 1. 翻译引擎选择
 st.sidebar.subheader("1. 选择翻译引擎")
 engine_choice = st.sidebar.radio(
     "请选择你要使用的翻译方式：",
-    ["🟢 免费基础版 (无需密钥，直接可用)", "🚀 AI 高级版 (需填密钥，精准语气)"]
+    ["🟢 免费基础版 (无需密钥，机翻质量)", "🚀 AI 高级版 (需填密钥，精准语气)"],
+    index=1 # 默认选中高级版
 )
 
 api_key = ""
@@ -27,8 +28,11 @@ base_url = ""
 model_name = ""
 
 if engine_choice == "🚀 AI 高级版 (需填密钥，精准语气)":
-    st.sidebar.info("高级版支持识别角色语气，但需要填写 API 密钥。")
+    st.sidebar.info("高级版支持识别角色语气，请填入官方 API 密钥。")
+    
+    # 预设加入了 Google Gemini 官方兼容接口
     api_presets = {
+        "Google Gemini (官方免费)": {"url": "https://generativelanguage.googleapis.com/v1beta/openai/", "model": "gemini-1.5-flash"},
         "Kimi (月之暗面)": {"url": "https://api.moonshot.cn/v1", "model": "moonshot-v1-8k"},
         "阿里通义千问": {"url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-plus"},
         "DeepSeek": {"url": "https://api.deepseek.com/v1", "model": "deepseek-chat"},
@@ -40,10 +44,10 @@ if engine_choice == "🚀 AI 高级版 (需填密钥，精准语气)":
         base_url = st.sidebar.text_input("API 网址", placeholder="https://...")
         model_name = st.sidebar.text_input("模型名称", placeholder="例如: gpt-3.5-turbo")
     else:
-        base_url = st.sidebar.text_input("API 网址", value=api_presets[selected_provider]["url"])
-        model_name = st.sidebar.text_input("模型名称", value=api_presets[selected_provider]["model"])
+        base_url = st.sidebar.text_input("API 网址 (已自动填写)", value=api_presets[selected_provider]["url"])
+        model_name = st.sidebar.text_input("模型名称 (已自动填写)", value=api_presets[selected_provider]["model"])
         
-    api_key = st.sidebar.text_input("输入 API Key (sk-...)", type="password")
+    api_key = st.sidebar.text_input("输入 API Key", type="password", placeholder="例如: AIzaSy... 或 sk-...")
 else:
     st.sidebar.success("✅ 当前为免密钥模式，直接上传文件即可运行！")
 
@@ -79,8 +83,12 @@ def load_whisper_model():
 
 def translate_with_ai(srt_chunk, target_opt, client, model):
     """AI 高级翻译"""
-    system_prompt = f"""你是一个专业的字幕翻译专家。目标：{target_opt}。
-请根据原文语气（如男女自称、口语）精准翻译。严格保留SRT时间轴格式，不要输出markdown。"""
+    system_prompt = f"""你是一个专业的影视字幕翻译专家。目标：{target_opt}。
+【核心要求】：
+1. 必须根据原文（如男女自称、语气词）精准推断角色性别和情绪，翻译出符合该角色的语气！
+2. 严格保留原有的 SRT 序号和时间轴格式（如 00:00:01,000 --> 00:00:04,000）。
+3. 如果是双语，原文在第一行，译文在第二行。
+4. 绝对不要输出任何 Markdown 标记（如 ```srt），直接输出纯文本。"""
     try:
         response = client.chat.completions.create(
             model=model,
@@ -165,7 +173,7 @@ if st.button("🚀 开始生成与翻译", type="primary", use_container_width=T
         final_srt_text = "\n".join(original_srt_lines)
         
         if "翻译" in target_option or "双语" in target_option:
-            if engine_choice == "🟢 免费基础版 (无需密钥，直接可用)":
+            if engine_choice == "🟢 免费基础版 (无需密钥，机翻质量)":
                 status_text.info("🌐 正在使用免费引擎进行翻译...")
                 final_srt_text = translate_with_free_engine(original_srt_lines, target_option)
                 progress_bar.progress(100)
@@ -179,7 +187,7 @@ if st.button("🚀 开始生成与翻译", type="primary", use_container_width=T
                 for i in range(total_chunks):
                     chunk_lines = original_srt_lines[i*chunk_size : (i+1)*chunk_size]
                     chunk_text = "\n".join(chunk_lines)
-                    status_text.info(f"🧠 正在翻译第 {i+1}/{total_chunks} 部分...")
+                    status_text.info(f"🧠 正在翻译第 {i+1}/{total_chunks} 部分 (AI 正在分析角色语气)...")
                     translated_chunk = translate_with_ai(chunk_text, target_option, client, model_name)
                     
                     if "翻译出错" in translated_chunk:
