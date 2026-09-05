@@ -21,7 +21,7 @@ st.sidebar.subheader("1. API 设置 (翻译大脑)")
 api_presets = {
     "Google Gemini": {
         "url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-        "model": "gemini-1.5-flash"
+        "model": "gemini-pro"
     },
     "DeepSeek (推荐, 极便宜)": {
         "url": "https://api.deepseek.com/v1",
