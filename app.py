@@ -32,7 +32,7 @@ if engine_choice == "🚀 AI 高级版 (需填密钥，精准语气)":
     
     # 预设加入了 Google Gemini 官方兼容接口
     api_presets = {
-        "Google Gemini (官方免费)": {"url": "https://generativelanguage.googleapis.com/v1beta/openai/", "model": "gemini-1.5-flash"},
+        "Google Gemini (官方免费)": {"url": "https://generativelanguage.googleapis.com/v1beta/openai/", "model": "gemini-1.5-pro"},
         "Kimi (月之暗面)": {"url": "https://api.moonshot.cn/v1", "model": "moonshot-v1-8k"},
         "阿里通义千问": {"url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-plus"},
         "DeepSeek": {"url": "https://api.deepseek.com/v1", "model": "deepseek-chat"},
