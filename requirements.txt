@@ -1,3 +1,4 @@
 streamlit
 faster-whisper
 openai
+deep-translator
