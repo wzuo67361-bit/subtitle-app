@@ -14,26 +14,51 @@ st.markdown("支持提取原字幕、多语言翻译、双语对照，以及智�
 # --- 侧边栏配置区 ---
 st.sidebar.header("⚙️ 选项配置")
 
-# 1. API 配置 (支持万能接入)
+# 1. API 配置 (预设主流平台)
 st.sidebar.subheader("1. API 设置 (翻译大脑)")
-api_provider = st.sidebar.radio(
-    "选择大模型提供商", 
-    ["DeepSeek (推荐)", "OpenAI", "自定义 (支持任意兼容平台)"]
-)
 
-if api_provider == "DeepSeek (推荐)":
-    base_url = "https://api.deepseek.com/v1"
-    model_name = "deepseek-chat"
-    api_key = st.sidebar.text_input("输入 DeepSeek API Key (sk-...)", type="password")
-elif api_provider == "OpenAI":
-    base_url = "https://api.openai.com/v1"
-    model_name = "gpt-4o-mini"
-    api_key = st.sidebar.text_input("输入 OpenAI API Key (sk-...)", type="password")
-else:
-    st.sidebar.info("💡 可接入阿里、Kimi、硅基流动或第三方代理")
+# 预设市面上主流且兼容 OpenAI 格式的平台
+api_presets = {
+    "DeepSeek (推荐, 极便宜)": {
+        "url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat"
+    },
+    "阿里通义千问 (Qwen)": {
+        "url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "model": "qwen-plus"
+    },
+    "Kimi (月之暗面)": {
+        "url": "https://api.moonshot.cn/v1",
+        "model": "moonshot-v1-8k"
+    },
+    "智谱 GLM": {
+        "url": "https://open.bigmodel.cn/api/paas/v4",
+        "model": "glm-4-flash"
+    },
+    "OpenAI 官方": {
+        "url": "https://api.openai.com/v1",
+        "model": "gpt-4o-mini"
+    },
+    "自定义 (其他代理/中转站)": {
+        "url": "",
+        "model": ""
+    }
+}
+
+selected_provider = st.sidebar.selectbox("选择大模型平台", list(api_presets.keys()))
+
+# 根据选择自动填充网址和模型
+if selected_provider == "自定义 (其他代理/中转站)":
+    st.sidebar.info("💡 请查阅你所用平台的官方文档获取以下信息")
     base_url = st.sidebar.text_input("API 网址 (Base URL)", placeholder="例如: https://api.siliconflow.cn/v1")
     model_name = st.sidebar.text_input("模型名称 (Model)", placeholder="例如: Qwen/Qwen2.5-7B-Instruct")
-    api_key = st.sidebar.text_input("输入你的 API Key", type="password")
+else:
+    base_url = api_presets[selected_provider]["url"]
+    model_name = api_presets[selected_provider]["model"]
+    st.sidebar.caption(f"🔗 自动配置网址: `{base_url}`")
+    st.sidebar.caption(f"🤖 自动配置模型: `{model_name}`")
+
+api_key = st.sidebar.text_input(f"输入 {selected_provider.split(' ')[0]} 的 API Key", type="password")
 
 # 2. 语言与字幕选项
 st.sidebar.subheader("2. 字幕设置")
@@ -125,7 +150,7 @@ if st.button("🚀 开始生成与翻译", type="primary", use_container_width=T
     
     if "翻译" in target_option or "双语" in target_option:
         if not api_key or not base_url or not model_name:
-            st.warning("⚠️ 请在左侧完整填写 API 网址、模型名称和 API Key！")
+            st.warning("⚠️ 请在左侧完整填写 API Key（如果是自定义平台，还需填写网址和模型）！")
             st.stop()
 
     # 1. 保存上传的文件到临时目录
