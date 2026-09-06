@@ -17,11 +17,10 @@ st.markdown("支持高精度语音识别、大模型角色语气推断、多语�
 st.sidebar.header("⚙️ 选项配置")
 
 # ==========================================
-# 1. 平台与模型选择 (严谨透明的联动菜单)
+# 1. 平台与模型选择 (联动菜单)
 # ==========================================
 st.sidebar.subheader("1. API 设置 (翻译大脑)")
 
-# 定义平台列表
 platforms = [
     "Google Gemini",
     "DeepSeek",
@@ -33,18 +32,16 @@ platforms = [
 
 selected_platform = st.sidebar.selectbox("① 选择大模型平台", platforms)
 
-# 初始化变量
 base_url = ""
 model_name = ""
 api_key = ""
 
-# 根据选择的平台，动态显示对应的模型列表和额度说明
 if selected_platform == "Google Gemini":
     st.sidebar.info(
-        "**【额度说明】**\n"
-        "- **免费额度**：官方提供极高的免费额度（15次请求/分钟，每天 1500 次）。\n"
-        "- **适用场景**：长视频翻译首选，完全免费且智商极高。\n"
-        "- **注意**：密钥必须以 `AIzaSy` 或 `gen-lang` 开头。"
+        "**【Google Gemini 模式】**\n"
+        "- 底层已开启 **全协议自适应握手**。\n"
+        "- 完美兼容 `AQ.` 新型凭证以及 `AIzaSy` 传统密钥。\n"
+        "- 官方提供丰厚的免费请求额度。"
     )
     gemini_models = [
         "gemini-1.5-flash", 
@@ -52,61 +49,39 @@ if selected_platform == "Google Gemini":
         "gemini-1.0-pro", 
         "gemini-pro"
     ]
-    model_name = st.sidebar.selectbox("② 选择具体模型 (若报错404请换一个试)", gemini_models)
-    base_url = "native_gemini" # 触发底层原生直连逻辑
+    model_name = st.sidebar.selectbox("② 选择具体模型", gemini_models)
+    base_url = "native_gemini"
     
 elif selected_platform == "DeepSeek":
-    st.sidebar.info(
-        "**【额度说明】**\n"
-        "- **免费额度**：新用户注册赠送 500万 Tokens（约可翻译上百部电影）。\n"
-        "- **计费规则**：极度便宜，1元人民币可翻译几百万字。\n"
-        "- **适用场景**：性价比之王，翻译质量极佳。"
-    )
+    st.sidebar.info("**【DeepSeek 模式】** 性价比极高，适合长文本高质量翻译。")
     deepseek_models = ["deepseek-chat", "deepseek-coder"]
     model_name = st.sidebar.selectbox("② 选择具体模型", deepseek_models)
     base_url = "https://api.deepseek.com/v1"
     
 elif selected_platform == "Kimi (月之暗面)":
-    st.sidebar.info(
-        "**【额度说明】**\n"
-        "- **免费额度**：新用户注册赠送 15 元体验金。\n"
-        "- **适用场景**：国内顶尖模型，上下文理解能力极强，语气还原度高。"
-    )
-    kimi_models = ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"]
+    st.sidebar.info("**【Kimi 模式】** 国内顶尖上下文理解与语气还原模型。")
+    kimi_models = ["moonshot-v1-8k", "moonshot-v1-32k"]
     model_name = st.sidebar.selectbox("② 选择具体模型", kimi_models)
     base_url = "https://api.moonshot.cn/v1"
     
 elif selected_platform == "阿里通义千问 (Qwen)":
-    st.sidebar.info(
-        "**【额度说明】**\n"
-        "- **免费额度**：新用户赠送数百万 Tokens 免费额度。\n"
-        "- **适用场景**：国内大厂，稳定可靠，响应速度快。"
-    )
+    st.sidebar.info("**【通义千问 模式】** 阿里大厂模型，稳定高速。")
     qwen_models = ["qwen-plus", "qwen-max", "qwen-turbo"]
     model_name = st.sidebar.selectbox("② 选择具体模型", qwen_models)
     base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     
 elif selected_platform == "OpenAI 官方":
-    st.sidebar.info(
-        "**【额度说明】**\n"
-        "- **无免费额度**：需绑定海外信用卡付费使用。\n"
-        "- **适用场景**：行业标杆，但国内网络访问受限且成本较高。"
-    )
+    st.sidebar.info("**【OpenAI 模式】** 行业基准模型。")
     openai_models = ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"]
     model_name = st.sidebar.selectbox("② 选择具体模型", openai_models)
     base_url = "https://api.openai.com/v1"
     
 else:
-    st.sidebar.info(
-        "**【自定义说明】**\n"
-        "- 适用于硅基流动(SiliconFlow)、各种 API 中转站或代理网站。\n"
-        "- 必须手动查阅你所用平台的官方文档，填入正确的网址和模型名。"
-    )
+    st.sidebar.info("**【自定义模式】** 请填入第三方中转/代理平台的标准地址与模型名。")
     base_url = st.sidebar.text_input("② 输入 API 网址 (Base URL)", placeholder="例如: https://api.siliconflow.cn/v1")
     model_name = st.sidebar.text_input("③ 输入模型名称", placeholder="例如: Qwen/Qwen2.5-7B-Instruct")
 
-# 统一的密钥输入框
-api_key = st.sidebar.text_input("最后：输入你的 API Key", type="password", placeholder="粘贴密钥...")
+api_key = st.sidebar.text_input("最后：输入你的 API Key (支持 AQ... / sk-...)", type="password")
 
 # ==========================================
 # 2. 语言与字幕选项
@@ -138,7 +113,6 @@ glossary = st.sidebar.text_area(
 # --- 核心处理函数 ---
 
 def format_timestamp(seconds: float):
-    """时间戳转 SRT 格式 (HH:MM:SS,mmm)"""
     hours = math.floor(seconds / 3600)
     seconds %= 3600
     minutes = math.floor(seconds / 60)
@@ -149,39 +123,57 @@ def format_timestamp(seconds: float):
 
 @st.cache_resource
 def load_whisper_model():
-    """加载 faster-whisper 引擎"""
     return WhisperModel("base", device="cpu", compute_type="int8")
 
-def call_gemini_native(prompt_text, user_content, key, model):
-    """Google Gemini 原生直连通道 (严谨处理 404 和 400 错误)"""
+def call_gemini_native(prompt_text, user_content, raw_key, model):
+    """Google Gemini 自适应握手协议：同时支持 x-goog-api-key, Bearer Token 与 Query 传参"""
     clean_model = model.replace("models/", "").strip()
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={key.strip()}"
+    key = raw_key.strip()
     
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent"
     full_instruction = f"{prompt_text}\n\n【待处理 SRT 字幕如下】：\n{user_content}"
+    
     payload = {
         "contents": [{"parts": [{"text": full_instruction}]}],
         "generationConfig": {"temperature": 0.3}
     }
-    headers = {"Content-Type": "application/json"}
+    
+    # 策略 1：使用 Google 官方推荐的 x-goog-api-key Header（专门接纳新型 AQ. 凭证）
+    headers_strategy_1 = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": key
+    }
     
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=90)
-        if response.status_code == 200:
-            data = response.json()
+        res = requests.post(endpoint, headers=headers_strategy_1, json=payload, timeout=90)
+        
+        # 策略 2：如果策略 1 报 401，尝试 Authorization: Bearer OAuth 认证头
+        if res.status_code == 401:
+            headers_strategy_2 = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {key}"
+            }
+            res = requests.post(endpoint, headers=headers_strategy_2, json=payload, timeout=90)
+            
+        # 策略 3：如果依然 401，尝试老版传统的 URL 问号传参
+        if res.status_code == 401:
+            url_strategy_3 = f"{endpoint}?key={key}"
+            res = requests.post(url_strategy_3, headers={"Content-Type": "application/json"}, json=payload, timeout=90)
+
+        # 结果解析
+        if res.status_code == 200:
+            data = res.json()
             result = data["candidates"][0]["content"]["parts"][0]["text"].strip()
             result = re.sub(r'^```(?:srt|text)?\n', '', result)
             return re.sub(r'\n```$', '', result)
-        elif response.status_code == 404:
-            return f"翻译出错: 404 找不到模型。你的密钥不支持【{clean_model}】，请在左侧下拉菜单换一个模型重试。"
-        elif response.status_code == 400:
-            return f"翻译出错: 400 密钥无效。请检查你的密钥是否完整且正确。"
         else:
-            return f"翻译出错: Google 服务器返回错误代码 {response.status_code} - {response.text}"
+            return f"翻译出错: Google 服务器响应异常 (代码 {res.status_code}) - {res.text}"
+            
     except Exception as e:
-        return f"翻译出错 (网络请求异常): {str(e)}"
+        return f"翻译出错 (网络异常): {str(e)}"
 
 def call_openai_compatible(prompt_text, user_content, key, url, model):
-    """OpenAI 兼容协议通道 (适用 DeepSeek, Kimi, 阿里, OpenAI 等)"""
+    """标准 OpenAI 兼容通道"""
     try:
         client = OpenAI(api_key=key.strip(), base_url=url.strip())
         response = client.chat.completions.create(
@@ -210,7 +202,7 @@ if st.button("🚀 开始生成与翻译", type="primary", use_container_width=T
     
     if "翻译" in target_option or "双语" in target_option:
         if not api_key or not model_name:
-            st.warning("⚠️ 请在左侧侧边栏完整选择模型并填入 API Key！")
+            st.warning("⚠️ 请在左侧侧边栏填入 API Key！")
             st.stop()
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
@@ -256,7 +248,7 @@ if st.button("🚀 开始生成与翻译", type="primary", use_container_width=T
 4. 若选择双语，第一行为原文，第二行为译文。
 5. 绝对不要输出任何 Markdown 标记（如 ```srt），直接输出纯文本。"""
 
-            chunk_size = 35 # 适中分块，保障翻译上下文同时杜绝截断
+            chunk_size = 35
             translated_srt_pieces = []
             total_chunks = math.ceil(len(original_srt_lines) / chunk_size)
             
@@ -265,14 +257,13 @@ if st.button("🚀 开始生成与翻译", type="primary", use_container_width=T
                 chunk_text = "\n".join(chunk_lines)
                 status_text.info(f"🧠 正在翻译第 {i+1}/{total_chunks} 组字幕 (角色语气分析中)...")
                 
-                # 路由判断：Google Gemini 走原生专线，其他走兼容协议
+                # 路由判断
                 if base_url == "native_gemini":
                     translated_chunk = call_gemini_native(system_prompt, chunk_text, api_key, model_name)
-                    time.sleep(2) # 严谨处理：增加2秒延迟，防止触发 Gemini 免费版每分钟15次的限流
+                    time.sleep(2) # 避免触发频率限制
                 else:
                     translated_chunk = call_openai_compatible(system_prompt, chunk_text, api_key, base_url, model_name)
                 
-                # 严谨的错误拦截
                 if "翻译出错" in translated_chunk:
                     st.error(translated_chunk)
                     st.stop()
