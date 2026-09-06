@@ -6,7 +6,6 @@ import tempfile
 import os
 import math
 import re
-import json
 
 # --- 页面配置 ---
 st.set_page_config(page_title="音视频字幕生成与翻译", page_icon="🎬", layout="wide")
@@ -20,7 +19,7 @@ st.sidebar.header("⚙️ 选项配置")
 st.sidebar.subheader("1. API 设置 (翻译大脑)")
 
 platform_options = [
-    "Google Gemini (官方推荐)",
+    "Google Gemini (全自动模型匹配)",
     "DeepSeek (高性价比)",
     "Kimi (月之暗面)",
     "阿里通义千问 (Qwen)",
@@ -31,10 +30,10 @@ platform_options = [
 selected_provider = st.sidebar.selectbox("选择大模型平台", platform_options)
 
 # 针对各平台的参数预设
-if selected_provider == "Google Gemini (官方推荐)":
-    st.sidebar.caption("⚡ 采用 Google 原生 v1beta 专线，解决 404 路由问题")
-    model_name = st.sidebar.text_input("模型名称", value="gemini-1.5-flash")
-    base_url = "" # Gemini 走专属原生通道
+if selected_provider == "Google Gemini (全自动模型匹配)":
+    st.sidebar.success("🤖 已启用全自动轮询：系统将在后台自动寻找你密钥支持的 Gemini 模型，无需手动填写！")
+    base_url = "" 
+    model_name = "auto-gemini" # 触发底层自动轮询逻辑
 elif selected_provider == "DeepSeek (高性价比)":
     base_url = st.sidebar.text_input("API 网址", value="https://api.deepseek.com/v1")
     model_name = st.sidebar.text_input("模型名称", value="deepseek-chat")
@@ -93,38 +92,52 @@ def load_whisper_model():
     """加载 faster-whisper 引擎"""
     return WhisperModel("base", device="cpu", compute_type="int8")
 
-def call_gemini_native(prompt_text, user_content, key, model):
-    """Google Gemini 原生 v1beta 直连通道，彻底根绝 404/v1main 错误"""
-    clean_model = model.replace("models/", "").strip()
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={key.strip()}"
+def call_gemini_auto_fallback(prompt_text, user_content, key):
+    """Google Gemini 全自动轮询通道：自动测试所有官方模型，直到找到可用的为止"""
+    
+    # Google 官方目前所有可能开放的 generateContent 模型列表
+    models_to_try = [
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+        "gemini-1.0-pro",
+        "gemini-pro"
+    ]
     
     full_instruction = f"{prompt_text}\n\n【待处理 SRT 字幕如下】：\n{user_content}"
-    
     payload = {
-        "contents": [
-            {
-                "parts": [{"text": full_instruction}]
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0.3
-        }
+        "contents": [{"parts": [{"text": full_instruction}]}],
+        "generationConfig": {"temperature": 0.3}
     }
-    
     headers = {"Content-Type": "application/json"}
     
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=90)
-        if response.status_code != 200:
-            return f"翻译出错 (Google 返回错误): {response.text}"
-        
-        data = response.json()
-        result = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        result = re.sub(r'^```(?:srt|text)?\n', '', result)
-        result = re.sub(r'\n```$', '', result)
-        return result
-    except Exception as e:
-        return f"翻译出错 (Gemini 请求异常): {str(e)}"
+    last_error = ""
+    
+    # 核心逻辑：自动挨个测试模型
+    for m in models_to_try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={key.strip()}"
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=90)
+            
+            if response.status_code == 200:
+                # 成功找到可用模型，提取数据并返回
+                data = response.json()
+                result = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                result = re.sub(r'^```(?:srt|text)?\n', '', result)
+                result = re.sub(r'\n```$', '', result)
+                return result
+            elif response.status_code == 404:
+                # 如果报 404，说明当前模型不被该密钥支持，记录错误并自动尝试下一个
+                last_error = response.text
+                continue
+            else:
+                # 如果是 401 密码错误或其他严重错误，直接中断并报错
+                return f"翻译出错 (Google 拒绝访问): {response.text}"
+                
+        except Exception as e:
+            return f"翻译出错 (网络请求异常): {str(e)}"
+            
+    # 如果循环结束还没 return，说明所有模型都被拒绝了
+    return f"翻译出错: 你的密钥不支持任何已知的 Gemini 模型。底层拦截信息: {last_error}"
 
 def call_openai_compatible(prompt_text, user_content, key, url, model):
     """OpenAI 兼容协议通道 (适用 DeepSeek, Kimi, 阿里, OpenAI)"""
@@ -191,7 +204,7 @@ if st.button("🚀 开始生成与翻译", type="primary", use_container_width=T
         final_srt_text = original_srt_text
         
         if "翻译" in target_option or "双语" in target_option:
-            status_text.info(f"🧠 正在调用大模型 ({model_name}) 深入解析对话与语气...")
+            status_text.info("🧠 正在调用大模型深入解析对话与语气...")
             
             system_prompt = f"""你是一个顶级的影视字幕翻译专家。目标任务：{target_option}。
 专业词汇校对对照表：\n{glossary}
@@ -212,9 +225,9 @@ if st.button("🚀 开始生成与翻译", type="primary", use_container_width=T
                 chunk_text = "\n".join(chunk_lines)
                 status_text.info(f"🧠 正在翻译第 {i+1}/{total_chunks} 组字幕 (角色语气分析中)...")
                 
-                # 路由判断：Google Gemini 走原生专线，其他平台走 OpenAI 协议
-                if selected_provider == "Google Gemini (官方推荐)":
-                    translated_chunk = call_gemini_native(system_prompt, chunk_text, api_key, model_name)
+                # 路由判断：Google Gemini 走全自动轮询专线，其他平台走 OpenAI 协议
+                if selected_provider == "Google Gemini (全自动模型匹配)":
+                    translated_chunk = call_gemini_auto_fallback(system_prompt, chunk_text, api_key)
                 else:
                     translated_chunk = call_openai_compatible(system_prompt, chunk_text, api_key, base_url, model_name)
                 
