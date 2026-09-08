@@ -1,7 +1,7 @@
 import os
 import imageio_ffmpeg
 
-# 自动获取 imageio-ffmpeg 自带的 ffmpeg 二进制文件路径，并注入到系统环境变量
+# 自动获取 imageio-ffmpeg 自带的 ffmpeg 二进制路径，并注入到系统环境变量
 ffmpeg_dir = os.path.dirname(imageio_ffmpeg.get_ffmpeg_exe())
 if ffmpeg_dir not in os.environ.get("PATH", ""):
     os.environ["PATH"] += os.pathsep + ffmpeg_dir
@@ -39,7 +39,7 @@ def process_translation_chunk(client, model_name, chunk_srt, system_prompt):
             contents=chunk_srt,
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
-                temperature=0.3, 
+                temperature=0.2, # 降低随机性，确保翻译严谨不乱
             )
         )
         result = response.text
@@ -54,16 +54,16 @@ def process_translation_chunk(client, model_name, chunk_srt, system_prompt):
 with st.sidebar:
     st.header("⚙️ Google AI Studio 配置")
     
-    # 提供常用模型下拉，同时也允许手动输入以防官方频繁改名导致 404
+    # 使用目前官方稳定支持且不会报 404 的标准模型代号
     model_option = st.selectbox(
         "选择大模型",
-        ["gemini-1.5-flash", "gemini-1.5-pro", "自定义输入模型名称..."],
+        ["gemini-2.5-flash", "gemini-2.5-pro", "自定义输入模型名称..."],
         index=0,
-        help="如果预设模型报错，请选择自定义并在下方输入官方最新的模型名称。"
+        help="推荐使用 gemini-2.5-flash，速度快且稳定；若需更强推理可选 gemini-2.5-pro。"
     )
     
     if model_option == "自定义输入模型名称...":
-        model_name = st.text_input("手动输入模型名称", value="gemini-1.5-flash", placeholder="例如: gemini-1.5-flash")
+        model_name = st.text_input("手动输入模型名称", value="gemini-2.5-flash", placeholder="例如: gemini-2.5-flash")
     else:
         model_name = model_option
 
@@ -74,10 +74,10 @@ with st.sidebar:
     st.header("📝 翻译设置")
     
     target_language = st.selectbox(
-        "目标语言 (你想翻译成什么语言？)",
+        "目标语言 (你想把视频翻译成什么语言？)",
         ["简体中文", "繁体中文", "English", "日本語 (日语)", "한국어 (韩语)"],
         index=0,
-        help="注意：原视频的语言会自动识别，此处只需选择你希望最终看到的翻译语言。"
+        help="原视频的声音语言由本地 AI 自动识别，此处仅需选择你期望最终看到的译文语言。"
     )
     
     target_style = st.selectbox(
@@ -85,7 +85,8 @@ with st.sidebar:
         [
             "纯译文 (仅保留目标语言，画面清爽)", 
             "双语对照 (第一行原文，第二行译文，适合学习)"
-        ]
+        ],
+        help="【纯译文】：字幕中只留翻译后的语言。\n【双语对照】：每句上下显示两行（原声+译文）。"
     )
     
     glossary = st.text_area("专业词汇对照表 (名词字典)", 
@@ -141,24 +142,23 @@ if uploaded_file is not None:
             client = genai.Client(api_key=api_key)
             
             if "双语对照" in target_style:
-                style_instruction = f"请输出【双语对照】格式：在每个时间轴下方，第一行为原文，第二行为翻译后的【{target_language}】。"
+                style_instruction = f"请输出【双语对照】格式：在每个时间轴下方，第一行为原始听到的文本，第二行为翻译后的【{target_language}】。"
             else:
                 style_instruction = f"请输出【纯译文】格式：在每个时间轴下方，只保留翻译后的【{target_language}】，绝对不要出现原文。"
                 
             glossary_instruction = f"请严格遵守以下专业词汇对照表：\n{glossary}\n" if glossary.strip() else ""
 
-            # 优化后的翻译提示词，解决乱和不准确问题
-            system_prompt = f"""你是一个顶级的影视字幕翻译专家，精通多国语言的口语习惯、俚语以及角色语气。
-我将发给你一段带有时间轴和序号的 SRT 格式字幕文本（由语音识别生成，可能存在断句破碎或错别字）。
+            # 进一步强化的提示词，解决翻译乱、断句碎的问题
+            system_prompt = f"""你是一个顶级的影视字幕翻译专家。我将发给你一段由语音识别生成的 SRT 格式字幕文本（可能存在断句破碎或错别字）。
 【核心任务与要求】
-1. **语义顺畅与准确**：请结合上下文推断前后因果关系，纠正由于语音识别带来的生硬断句，翻译出地道、符合母语习惯的句子，拒绝生硬机翻。
-2. **语气与角色还原**：根据上下文细微线索（如自称、语气词、敬语），推断说话人身份。男声翻译得硬朗自然，女声温柔贴切。
-3. **格式红线**：绝对不能改变、遗漏、拆分或合并任何一个 SRT 的序号和时间轴！必须原样带上时间戳输出，输入输出的块数量必须严格一致。
+1. **语境推导与纠错**：请结合前后上下文将破碎的口语连成通顺、符合【{target_language}】母语习惯的电影级字幕，严禁生硬机翻。
+2. **语气还原**：根据上下文线索（如自称、语气词、敬语）精准推断说话人身份与性别，男声硬朗自然，女声温柔贴切。
+3. **格式红线（极为重要）**：绝对不能改变、遗漏、拆分或合并任何一个 SRT 的序号和时间轴！必须原样带上时间戳输出，输入输出的 SRT 块数量必须完全一致。
 4. **排版格式**：{style_instruction}
 5. **专有名词**：{glossary_instruction}
 6. **输出限制**：你的回复必须且只能是符合 SRT 标准格式的纯文本。不要包含 Markdown 代码块（如 ```srt），不要附带任何寒暄或解释。"""
 
-            chunk_size = 30 # 稍微缩小分块，保证上下文精炼不乱
+            chunk_size = 30 
             total_chunks = math.ceil(total_segments / chunk_size)
             translated_srt = ""
             
