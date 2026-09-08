@@ -1,299 +1,183 @@
 import streamlit as st
-from faster_whisper import WhisperModel
-from openai import OpenAI
-import requests
 import tempfile
 import os
 import math
-import re
-import time
+from faster_whisper import WhisperModel
+from google import genai
+from google.genai import types
 
-# --- 页面配置 ---
-st.set_page_config(page_title="音视频字幕生成与翻译", page_icon="🎬", layout="wide")
-st.title("🎬 音视频字幕生成与翻译 Web 应用")
-st.markdown("支持高精度语音识别、大模型角色语气推断、多语言翻译及双语对照。")
+# 页面配置
+st.set_page_config(page_title="音视频字幕生成与翻译", layout="wide", page_icon="🎬")
 
-# --- 侧边栏配置区 ---
-st.sidebar.header("⚙️ 选项配置")
+# ----------------- 辅助工具函数 -----------------
 
-# ==========================================
-# 1. 平台与模型选择 (联动菜单)
-# ==========================================
-st.sidebar.subheader("1. API 设置 (翻译大脑)")
-
-platforms = [
-    "Google Gemini",
-    "DeepSeek",
-    "Kimi (月之暗面)",
-    "阿里通义千问 (Qwen)",
-    "OpenAI 官方",
-    "自定义 (第三方代理/中转)"
-]
-
-selected_platform = st.sidebar.selectbox("① 选择大模型平台", platforms)
-
-base_url = ""
-model_name = ""
-api_key = ""
-
-if selected_platform == "Google Gemini":
-    st.sidebar.info(
-        "**【Google Gemini 模式】**\n"
-        "- 底层已开启 **全协议自适应握手**。\n"
-        "- 完美兼容 `AQ.` 新型凭证以及 `AIzaSy` 传统密钥。\n"
-        "- 官方提供丰厚的免费请求额度。"
-    )
-    gemini_models = [
-        "gemini-1.5-flash", 
-        "gemini-1.5-pro", 
-        "gemini-1.0-pro", 
-        "gemini-pro"
-    ]
-    model_name = st.sidebar.selectbox("② 选择具体模型", gemini_models)
-    base_url = "native_gemini"
-    
-elif selected_platform == "DeepSeek":
-    st.sidebar.info("**【DeepSeek 模式】** 性价比极高，适合长文本高质量翻译。")
-    deepseek_models = ["deepseek-chat", "deepseek-coder"]
-    model_name = st.sidebar.selectbox("② 选择具体模型", deepseek_models)
-    base_url = "https://api.deepseek.com/v1"
-    
-elif selected_platform == "Kimi (月之暗面)":
-    st.sidebar.info("**【Kimi 模式】** 国内顶尖上下文理解与语气还原模型。")
-    kimi_models = ["moonshot-v1-8k", "moonshot-v1-32k"]
-    model_name = st.sidebar.selectbox("② 选择具体模型", kimi_models)
-    base_url = "https://api.moonshot.cn/v1"
-    
-elif selected_platform == "阿里通义千问 (Qwen)":
-    st.sidebar.info("**【通义千问 模式】** 阿里大厂模型，稳定高速。")
-    qwen_models = ["qwen-plus", "qwen-max", "qwen-turbo"]
-    model_name = st.sidebar.selectbox("② 选择具体模型", qwen_models)
-    base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    
-elif selected_platform == "OpenAI 官方":
-    st.sidebar.info("**【OpenAI 模式】** 行业基准模型。")
-    openai_models = ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"]
-    model_name = st.sidebar.selectbox("② 选择具体模型", openai_models)
-    base_url = "https://api.openai.com/v1"
-    
-else:
-    st.sidebar.info("**【自定义模式】** 请填入第三方中转/代理平台的标准地址与模型名。")
-    base_url = st.sidebar.text_input("② 输入 API 网址 (Base URL)", placeholder="例如: https://api.siliconflow.cn/v1")
-    model_name = st.sidebar.text_input("③ 输入模型名称", placeholder="例如: Qwen/Qwen2.5-7B-Instruct")
-
-api_key = st.sidebar.text_input("最后：输入你的 API Key (支持 AQ... / sk-...)", type="password")
-
-# ==========================================
-# 2. 语言与字幕选项
-# ==========================================
-st.sidebar.subheader("2. 字幕设置")
-source_lang = st.sidebar.selectbox("视频源语言", ["ja (日语)", "auto (自动识别)", "en (英语)", "zh (中文)"], index=0)
-
-target_option = st.sidebar.selectbox(
-    "目标字幕选项",
-    [
-        "仅生成日文原字幕 (SRT)",
-        "翻译为简体中文 (SRT)",
-        "翻译为英文 (SRT)",
-        "生成【日/中】双语对照字幕 (SRT)",
-        "生成【日/英】双语对照字幕 (SRT)"
-    ]
-)
-
-# ==========================================
-# 3. 专业词汇校正
-# ==========================================
-st.sidebar.subheader("3. 专业词汇/专有名词校正")
-glossary = st.sidebar.text_area(
-    "输入翻译对照（如：人名、术语），每行一个",
-    placeholder="例如：\n山田太郎 -> Yamada Taro\n术语A -> Term A",
-    height=100
-)
-
-# --- 核心处理函数 ---
-
-def format_timestamp(seconds: float):
-    hours = math.floor(seconds / 3600)
-    seconds %= 3600
-    minutes = math.floor(seconds / 60)
-    seconds %= 60
-    milliseconds = round((seconds - math.floor(seconds)) * 1000)
-    seconds = math.floor(seconds)
-    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
+def format_timestamp(seconds: float) -> str:
+    """将秒数转换为 SRT 格式的时间戳 (HH:MM:SS,mmm)"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    millis = int((seconds - int(seconds)) * 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 @st.cache_resource
 def load_whisper_model():
+    """缓存加载 Faster-Whisper 模型，适应免费云端 CPU 环境"""
+    # 强制使用 CPU 和 int8 量化，防止 Streamlit Cloud 内存爆栈
     return WhisperModel("base", device="cpu", compute_type="int8")
 
-def call_gemini_native(prompt_text, user_content, raw_key, model):
-    """Google Gemini 自适应握手协议：同时支持 x-goog-api-key, Bearer Token 与 Query 传参"""
-    clean_model = model.replace("models/", "").strip()
-    key = raw_key.strip()
-    
-    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent"
-    full_instruction = f"{prompt_text}\n\n【待处理 SRT 字幕如下】：\n{user_content}"
-    
-    payload = {
-        "contents": [{"parts": [{"text": full_instruction}]}],
-        "generationConfig": {"temperature": 0.3}
-    }
-    
-    # 策略 1：使用 Google 官方推荐的 x-goog-api-key Header（专门接纳新型 AQ. 凭证）
-    headers_strategy_1 = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": key
-    }
-    
+def process_translation_chunk(client, model_name, chunk_srt, system_prompt):
+    """调用 Google AI Studio 翻译一个字幕块"""
     try:
-        res = requests.post(endpoint, headers=headers_strategy_1, json=payload, timeout=90)
-        
-        # 策略 2：如果策略 1 报 401，尝试 Authorization: Bearer OAuth 认证头
-        if res.status_code == 401:
-            headers_strategy_2 = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {key}"
-            }
-            res = requests.post(endpoint, headers=headers_strategy_2, json=payload, timeout=90)
-            
-        # 策略 3：如果依然 401，尝试老版传统的 URL 问号传参
-        if res.status_code == 401:
-            url_strategy_3 = f"{endpoint}?key={key}"
-            res = requests.post(url_strategy_3, headers={"Content-Type": "application/json"}, json=payload, timeout=90)
-
-        # 结果解析
-        if res.status_code == 200:
-            data = res.json()
-            result = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-            result = re.sub(r'^```(?:srt|text)?\n', '', result)
-            return re.sub(r'\n```$', '', result)
-        else:
-            return f"翻译出错: Google 服务器响应异常 (代码 {res.status_code}) - {res.text}"
-            
-    except Exception as e:
-        return f"翻译出错 (网络异常): {str(e)}"
-
-def call_openai_compatible(prompt_text, user_content, key, url, model):
-    """标准 OpenAI 兼容通道"""
-    try:
-        client = OpenAI(api_key=key.strip(), base_url=url.strip())
-        response = client.chat.completions.create(
-            model=model.strip(),
-            messages=[
-                {"role": "system", "content": prompt_text},
-                {"role": "user", "content": user_content}
-            ],
-            temperature=0.3
+        # 使用 Gemini 官方推荐的配置方式，将要求放入 system_instruction
+        response = client.models.generate_content(
+            model=model_name,
+            contents=chunk_srt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=0.3, # 较低温度保证 SRT 序号和时间轴不乱
+            )
         )
-        result = response.choices[0].message.content.strip()
-        result = re.sub(r'^```(?:srt|text)?\n', '', result)
-        return re.sub(r'\n```$', '', result)
+        # 清理可能被大模型包裹的 Markdown 代码块标记
+        result = response.text
+        if result:
+            return result.replace("```srt", "").replace("```", "").strip()
+        return ""
     except Exception as e:
-        return f"翻译出错: {str(e)}"
+        return f"翻译报错: {str(e)}"
 
-# --- 主界面执行逻辑 ---
+# ----------------- 侧边栏：API 与 设置 -----------------
 
-st.write("### 📤 第一步：上传音视频文件")
-uploaded_file = st.file_uploader("支持 MP4, MP3, WAV, M4A 等主流音视频格式", type=['mp4', 'mp3', 'wav', 'm4a'])
-
-if st.button("🚀 开始生成与翻译", type="primary", use_container_width=True):
-    if not uploaded_file:
-        st.warning("⚠️ 请先上传音视频文件！")
-        st.stop()
+with st.sidebar:
+    st.header("⚙️ Google AI Studio 配置")
+    st.markdown("请填入你的 Google AI Studio API 密钥。")
     
-    if "翻译" in target_option or "双语" in target_option:
-        if not api_key or not model_name:
-            st.warning("⚠️ 请在左侧侧边栏填入 API Key！")
+    # 针对 Google 简化了输入框，默认推荐 flash 模型，速度最快且便宜/免费
+    model_name = st.text_input("模型名称 (Model)", value="gemini-2.5-flash", placeholder="例如: gemini-2.5-flash")
+    api_key = st.text_input("API Key (密钥)", type="password", placeholder="AIzaSy...")
+    
+    st.divider()
+    
+    st.header("📝 翻译设置")
+    target_style = st.radio("生成格式", ["双语对照", "纯译文"])
+    glossary = st.text_area("专业词汇对照表 (名词字典)", 
+                            placeholder="每行输入一个，例如：\nApple=苹果\nJohn=约翰",
+                            help="强制 AI 在翻译时遵守这些特定名词的翻译。")
+
+# ----------------- 主界面 -----------------
+
+st.title("🎬 音视频字幕生成与翻译 Web 应用")
+st.markdown("基于 `faster-whisper` 本地识别 + **Google AI Studio (Gemini)** 智能翻译。")
+
+uploaded_file = st.file_uploader("📂 上传音视频文件", type=["mp4", "mp3", "wav", "m4a"])
+
+if 'final_srt' not in st.session_state:
+    st.session_state.final_srt = ""
+
+if uploaded_file is not None:
+    if st.button("🚀 开始处理 (提取字幕 + AI 翻译)", type="primary"):
+        # 验证 API 必填项
+        if not model_name or not api_key:
+            st.error("⚠️ 请在左侧边栏填写完整的 Google AI Studio 模型名称和 API Key！")
             st.stop()
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
-        tmp_file.write(uploaded_file.read())
-        tmp_file_path = tmp_file.name
-
-    try:
-        st.write("### ⏳ 第二步：处理进度")
-        progress_bar = st.progress(0)
+            
+        progress_bar = st.progress(0.0)
         status_text = st.empty()
-
-        # 1. Faster-Whisper 音频提取
-        status_text.info("🎧 正在使用 faster-whisper 提取原字幕 (请稍候)...")
-        model = load_whisper_model()
-        lang_code = source_lang.split(" ")[0]
-        lang_param = None if lang_code == "auto" else lang_code
         
-        segments, info = model.transcribe(tmp_file_path, language=lang_param, beam_size=5)
-        
-        original_srt_lines = []
-        for i, segment in enumerate(segments, start=1):
-            start_time = format_timestamp(segment.start)
-            end_time = format_timestamp(segment.end)
-            text = segment.text.strip()
-            original_srt_lines.append(f"{i}\n{start_time} --> {end_time}\n{text}\n")
-            
-        original_srt_text = "\n".join(original_srt_lines)
-        progress_bar.progress(50)
+        try:
+            # 步骤 1：保存上传的文件到临时目录
+            status_text.info("正在保存上传的文件...")
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
+                tmp_file.write(uploaded_file.read())
+                tmp_file_path = tmp_file.name
 
-        # 2. AI 智能翻译与语气校正
-        final_srt_text = original_srt_text
-        
-        if "翻译" in target_option or "双语" in target_option:
-            status_text.info(f"🧠 正在调用大模型 ({model_name}) 深入解析对话与语气...")
+            # 步骤 2：使用 Faster-Whisper 提取语音
+            status_text.info("正在使用 faster-whisper 提取原始语音 (这在 CPU 上可能需要一点时间)...")
+            model = load_whisper_model()
+            segments, info = model.transcribe(tmp_file_path, beam_size=5)
             
-            system_prompt = f"""你是一个顶级的影视字幕翻译专家。目标任务：{target_option}。
-专业词汇校对对照表：\n{glossary}
-
-【核心翻译原则 - 智能角色与语气还原】：
-1. 必须通盘理解日文上下文，根据自称（俺、僕、私、あたし等）、句尾终助词（わ、ぜ、ぞ、かしら等）以及敬语/简体的差异，精准推断说话人的性别与身份关系。
-2. 翻译出的译文必须符合该角色的性格与语气！男性台词坚决展现男人口吻，女性台词体现女性口吻，坚决杜绝生硬机翻。
-3. 严格保留原有的 SRT 序号和时间轴格式（如 1 \\n 00:00:01,000 --> 00:00:04,000）。
-4. 若选择双语，第一行为原文，第二行为译文。
-5. 绝对不要输出任何 Markdown 标记（如 ```srt），直接输出纯文本。"""
-
-            chunk_size = 35
-            translated_srt_pieces = []
-            total_chunks = math.ceil(len(original_srt_lines) / chunk_size)
+            # 解析并构建原始字幕列表
+            srt_blocks = []
+            segment_list = list(segments)
+            total_segments = len(segment_list)
             
-            for i in range(total_chunks):
-                chunk_lines = original_srt_lines[i*chunk_size : (i+1)*chunk_size]
-                chunk_text = "\n".join(chunk_lines)
-                status_text.info(f"🧠 正在翻译第 {i+1}/{total_chunks} 组字幕 (角色语气分析中)...")
+            if total_segments == 0:
+                st.warning("未在文件中检测到人声。")
+                st.stop()
                 
-                # 路由判断
-                if base_url == "native_gemini":
-                    translated_chunk = call_gemini_native(system_prompt, chunk_text, api_key, model_name)
-                    time.sleep(2) # 避免触发频率限制
-                else:
-                    translated_chunk = call_openai_compatible(system_prompt, chunk_text, api_key, base_url, model_name)
+            for i, segment in enumerate(segment_list):
+                start_str = format_timestamp(segment.start)
+                end_str = format_timestamp(segment.end)
+                block_text = f"{i+1}\n{start_str} --> {end_str}\n{segment.text.strip()}\n"
+                srt_blocks.append(block_text)
                 
-                if "翻译出错" in translated_chunk:
-                    st.error(translated_chunk)
-                    st.stop()
-                    
-                translated_srt_pieces.append(translated_chunk)
-                current_progress = 50 + int(50 * ((i + 1) / total_chunks))
+            status_text.success(f"语音提取完毕！共提取到 {total_segments} 句字幕。开始连接 Google AI Studio 进行翻译...")
+            progress_bar.progress(0.2)
+
+            # 步骤 3：构建 Google GenAI 客户端与系统提示词
+            client = genai.Client(api_key=api_key)
+            
+            style_instruction = "请输出【纯译文】（只保留你翻译后的目标语言内容，不留原文）。"
+            if target_style == "双语对照":
+                style_instruction = "请输出【双语对照】（第一行为原始语言文字，第二行为翻译后的文字）。"
+                
+            glossary_instruction = f"请严格遵守以下专业词汇翻译对照表：\n{glossary}\n" if glossary.strip() else ""
+
+            # Gemini 极其擅长角色扮演和语气模仿，这里的提示词专门为 Gemini 做了优化
+            system_prompt = f"""你是一个顶级的影视字幕翻译专家，深谙语言背后的语境与角色性格。
+我将发给你一段带有时间轴和序号的 SRT 格式字幕文本。
+【核心要求】
+1. 格式红线：绝对不能改变、遗漏或合并任何一个 SRT 的序号和时间轴！必须原样带上时间戳输出。
+2. 语气神态还原：这是最关键的一点。你需要根据上下文细微的线索（如日语的自称“俺/私”、句尾的语气助词、敬语程度等），精准推断说话人的性别、身份和性格。男声必须翻译得硬朗、自然；女声必须温柔、贴切。坚决拒绝机械感和“翻译腔”。
+3. 排版要求：{style_instruction}
+4. 专有名词：{glossary_instruction}
+5. 输出限制：你的回复必须且只能是符合 SRT 标准格式的纯文本。不要包含 Markdown 代码块标记（如 ```srt），不要附带任何解释性文字或寒暄。"""
+
+            # 步骤 4：分块 (Chunking) 翻译逻辑
+            # Gemini 虽然有超大上下文，但在翻译强格式（SRT）文本时，分块依然能最有效防止大模型偷懒漏行
+            chunk_size = 35 
+            total_chunks = math.ceil(total_segments / chunk_size)
+            translated_srt = ""
+            
+            for chunk_idx in range(total_chunks):
+                start_idx = chunk_idx * chunk_size
+                end_idx = min(start_idx + chunk_size, total_segments)
+                chunk_srt_text = "\n".join(srt_blocks[start_idx:end_idx])
+                
+                status_text.info(f"正在使用 Gemini 翻译：第 {chunk_idx + 1} / {total_chunks} 块 ...")
+                
+                translated_chunk = process_translation_chunk(client, model_name, chunk_srt_text, system_prompt)
+                translated_srt += translated_chunk + "\n\n"
+                
+                # 更新进度条
+                current_progress = 0.2 + (0.8 * ((chunk_idx + 1) / total_chunks))
                 progress_bar.progress(current_progress)
-                
-            final_srt_text = "\n\n".join(translated_srt_pieces)
-        else:
-            progress_bar.progress(100)
 
-        status_text.success("✅ 全部处理完成！请在下方预览并下载字幕。")
-
-        # 3. 预览与下载
-        st.write("---")
-        st.write("### 👀 第三步：字幕预览与下载")
-        st.text_area("字幕内容确认区（可直接在此处二次编辑）：", final_srt_text, height=400)
-        
-        st.download_button(
-            label="⬇️ 一键下载 .srt 字幕文件",
-            data=final_srt_text,
-            file_name=f"{os.path.splitext(uploaded_file.name)[0]}_subtitle.srt",
-            mime="text/plain",
-            type="primary",
-            use_container_width=True
-        )
-
-    except Exception as e:
-        st.error(f"❌ 处理过程中发生异常: {str(e)}")
-    finally:
-        if os.path.exists(tmp_file_path):
+            # 处理完毕，保存结果到状态并清理临时文件
+            st.session_state.final_srt = translated_srt.strip()
             os.remove(tmp_file_path)
+            
+            status_text.success("🎉 字幕提取与翻译全部完成！请在下方预览或下载。")
+            
+        except Exception as e:
+            st.error(f"处理过程中发生错误：{str(e)}")
+            if 'tmp_file_path' in locals() and os.path.exists(tmp_file_path):
+                os.remove(tmp_file_path)
+
+# ----------------- 结果展示与下载 -----------------
+
+if st.session_state.final_srt:
+    st.divider()
+    st.subheader("📝 翻译结果 (支持直接二次修改)")
+    
+    # 超大文本框用于预览和编辑
+    edited_srt = st.text_area("字幕预览", value=st.session_state.final_srt, height=500, label_visibility="collapsed")
+    
+    # 动态下载按钮
+    file_name = uploaded_file.name.rsplit('.', 1)[0] + "_translated.srt" if uploaded_file else "subtitle.srt"
+    st.download_button(
+        label="⬇️ 一键下载 .srt 文件",
+        data=edited_srt,
+        file_name=file_name,
+        mime="text/plain",
+        type="primary"
+    )
