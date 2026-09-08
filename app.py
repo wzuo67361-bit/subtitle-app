@@ -1,11 +1,13 @@
-import streamlit as st
-import static_ffmpeg
-
-# 自动定位并添加环境二进制路径，完全脱离对系统 apt-get ffmpeg 的依赖
-static_ffmpeg.add_paths()
-
-import tempfile
 import os
+import imageio_ffmpeg
+
+# 【关键修复】自动获取 imageio-ffmpeg 自带的 ffmpeg 二进制文件路径，并注入到系统环境变量
+ffmpeg_dir = os.path.dirname(imageio_ffmpeg.get_ffmpeg_exe())
+if ffmpeg_dir not in os.environ.get("PATH", ""):
+    os.environ["PATH"] += os.pathsep + ffmpeg_dir
+
+import streamlit as st
+import tempfile
 import math
 from faster_whisper import WhisperModel
 from google import genai
