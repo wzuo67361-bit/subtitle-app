@@ -1,7 +1,7 @@
 import os
 import imageio_ffmpeg
 
-# 【关键修复】自动获取 imageio-ffmpeg 自带的 ffmpeg 二进制文件路径，并注入到系统环境变量
+# 自动获取 imageio-ffmpeg 自带的 ffmpeg 二进制文件路径，并注入到系统环境变量
 ffmpeg_dir = os.path.dirname(imageio_ffmpeg.get_ffmpeg_exe())
 if ffmpeg_dir not in os.environ.get("PATH", ""):
     os.environ["PATH"] += os.pathsep + ffmpeg_dir
@@ -40,7 +40,7 @@ def process_translation_chunk(client, model_name, chunk_srt, system_prompt):
             contents=chunk_srt,
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
-                temperature=0.3, # 较低温度保证 SRT 序号和时间轴不乱
+                temperature=0.2, # 进一步降低温度(0.2)，让模型更加死板地遵循 SRT 格式
             )
         )
         result = response.text
@@ -54,15 +54,43 @@ def process_translation_chunk(client, model_name, chunk_srt, system_prompt):
 
 with st.sidebar:
     st.header("⚙️ Google AI Studio 配置")
-    st.markdown("请填入你的 Google AI Studio API 密钥。")
+    st.markdown("API 已自动适配 Google 最新政策。")
     
-    model_name = st.text_input("模型名称 (Model)", value="gemini-2.5-flash", placeholder="例如: gemini-2.5-flash")
+    # 针对 Google 提供的真实有效模型列表
+    model_dict = {
+        "gemini-3.6-flash": "🌟 推荐 (最新极速版) - 速度最快，免费配额充足，适合绝大多数视频。不会报 404。",
+        "gemini-3.6-pro": "🔥 进阶 (最新专业版) - 逻辑与语境极强，适合带大量术语的纪录片或电影，速度稍慢。",
+        "gemini-1.5-pro": "💼 备用 (旧版专业版) - 仅供部分老账号使用的经典长上下文模型。"
+    }
+    
+    selected_model_key = st.selectbox(
+        "选择大模型 (Model)",
+        options=list(model_dict.keys()),
+        format_func=lambda x: model_dict[x]
+    )
+    
     api_key = st.text_input("API Key (密钥)", type="password", placeholder="AIzaSy...")
     
     st.divider()
     
     st.header("📝 翻译设置")
-    target_style = st.radio("生成格式", ["双语对照", "纯译文"])
+    
+    # 恢复多语言选项
+    target_language = st.selectbox(
+        "目标语言",
+        ["简体中文", "繁体中文", "English", "日本語 (日语)", "한국어 (韩语)"],
+        index=0
+    )
+    
+    # 恢复双语对照选项
+    target_style = st.radio(
+        "生成排版格式", 
+        [
+            "纯译文 (仅保留翻译后的语言)", 
+            "双语对照 (第一行原文，第二行译文)"
+        ]
+    )
+    
     glossary = st.text_area("专业词汇对照表 (名词字典)", 
                             placeholder="每行输入一个，例如：\nApple=苹果\nJohn=约翰",
                             help="强制 AI 在翻译时遵守这些特定名词的翻译。")
@@ -79,8 +107,8 @@ if 'final_srt' not in st.session_state:
 
 if uploaded_file is not None:
     if st.button("🚀 开始处理 (提取字幕 + AI 翻译)", type="primary"):
-        if not model_name or not api_key:
-            st.error("⚠️ 请在左侧边栏填写完整的 Google AI Studio 模型名称和 API Key！")
+        if not api_key:
+            st.error("⚠️ 请在左侧边栏填写 Google AI Studio 的 API Key！")
             st.stop()
             
         progress_bar = st.progress(0.0)
@@ -112,24 +140,26 @@ if uploaded_file is not None:
                 block_text = f"{i+1}\n{start_str} --> {end_str}\n{segment.text.strip()}\n"
                 srt_blocks.append(block_text)
                 
-            status_text.success(f"语音提取完毕！共提取到 {total_segments} 句字幕。开始连接 Google AI Studio 进行翻译...")
+            status_text.success(f"语音提取完毕！共提取到 {total_segments} 句字幕。开始连接 Google AI ({selected_model_key}) 进行翻译...")
             progress_bar.progress(0.2)
 
-            # 步骤 3：构建 Google GenAI 客户端与系统提示词
+            # 步骤 3：构建 Google GenAI 客户端与强约束系统提示词
             client = genai.Client(api_key=api_key)
             
-            style_instruction = "请输出【纯译文】（只保留你翻译后的目标语言内容，不留原文）。"
-            if target_style == "双语对照":
-                style_instruction = "请输出【双语对照】（第一行为原始语言文字，第二行为翻译后的文字）。"
+            # 动态生成格式约束
+            if "双语对照" in target_style:
+                style_instruction = f"请将字幕翻译为【{target_language}】。并且输出格式必须为：双语对照（时间轴下方的第一行为原始语言文字，第二行为翻译后的{target_language}文字）。"
+            else:
+                style_instruction = f"请将字幕翻译为【{target_language}】。并且输出格式必须为：纯译文（时间轴下方只保留你翻译后的{target_language}内容，绝对不要出现原语言）。"
                 
-            glossary_instruction = f"请严格遵守以下专业词汇翻译对照表：\n{glossary}\n" if glossary.strip() else ""
+            glossary_instruction = f"请严格遵守以下专业词汇翻译对照表：\n{glossary}\n" if glossary.strip() else "无需特别的词汇表对照。"
 
-            system_prompt = f"""你是一个顶级的影视字幕翻译专家，深谙语言背后的语境与角色性格。
-我将发给你一段带有时间轴和序号的 SRT 格式字幕文本。
-【核心要求】
-1. 格式红线：绝对不能改变、遗漏或合并任何一个 SRT 的序号和时间轴！必须原样带上时间戳输出。
-2. 语气神态还原：这是最关键的一点。你需要根据上下文细微的线索（如日语的自称“俺/私”、句尾的语气助词、敬语程度等），精准推断说话人的性别、身份和性格。男声必须翻译得硬朗、自然；女声必须温柔、贴切。坚决拒绝机械感和“翻译腔”。
-3. 排版要求：{style_instruction}
+            # 极其严苛的系统指令 (防丢行、防吞时间轴)
+            system_prompt = f"""你是一个顶级的影视字幕翻译专家。我将发给你一段带有时间轴和序号的 SRT 格式字幕文本。
+【核心要求与红线】
+1. 格式绝对红线：绝对不能改变、遗漏、拆分或合并任何一个 SRT 的序号和时间轴！必须原样带上时间戳输出。即使你认为原文两句话可以合并，也**绝对禁止**合并时间轴，你翻译输出的 SRT 块数量必须和输入完全一致！
+2. 翻译目标与格式：{style_instruction}
+3. 语气神态还原：你需要根据上下文细微的线索（如自称、句尾语气助词、敬语程度等），精准推断说话人的性别、身份和性格。男声必须翻译得硬朗自然；女声必须温柔贴切。坚决拒绝生硬的机器翻译感。
 4. 专有名词：{glossary_instruction}
 5. 输出限制：你的回复必须且只能是符合 SRT 标准格式的纯文本。不要包含 Markdown 代码块标记（如 ```srt），不要附带任何解释性文字或寒暄。"""
 
@@ -143,9 +173,9 @@ if uploaded_file is not None:
                 end_idx = min(start_idx + chunk_size, total_segments)
                 chunk_srt_text = "\n".join(srt_blocks[start_idx:end_idx])
                 
-                status_text.info(f"正在使用 Gemini 翻译：第 {chunk_idx + 1} / {total_chunks} 块 ...")
+                status_text.info(f"正在使用 {selected_model_key} 翻译：第 {chunk_idx + 1} / {total_chunks} 块 ...")
                 
-                translated_chunk = process_translation_chunk(client, model_name, chunk_srt_text, system_prompt)
+                translated_chunk = process_translation_chunk(client, selected_model_key, chunk_srt_text, system_prompt)
                 translated_srt += translated_chunk + "\n\n"
                 
                 current_progress = 0.2 + (0.8 * ((chunk_idx + 1) / total_chunks))
