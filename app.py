@@ -1,4 +1,9 @@
 import streamlit as st
+import static_ffmpeg
+
+# 自动定位并添加环境二进制路径，完全脱离对系统 apt-get ffmpeg 的依赖
+static_ffmpeg.add_paths()
+
 import tempfile
 import os
 import math
@@ -28,7 +33,6 @@ def load_whisper_model():
 def process_translation_chunk(client, model_name, chunk_srt, system_prompt):
     """调用 Google AI Studio 翻译一个字幕块"""
     try:
-        # 使用 Gemini 官方推荐的配置方式，将要求放入 system_instruction
         response = client.models.generate_content(
             model=model_name,
             contents=chunk_srt,
@@ -37,7 +41,6 @@ def process_translation_chunk(client, model_name, chunk_srt, system_prompt):
                 temperature=0.3, # 较低温度保证 SRT 序号和时间轴不乱
             )
         )
-        # 清理可能被大模型包裹的 Markdown 代码块标记
         result = response.text
         if result:
             return result.replace("```srt", "").replace("```", "").strip()
@@ -51,7 +54,6 @@ with st.sidebar:
     st.header("⚙️ Google AI Studio 配置")
     st.markdown("请填入你的 Google AI Studio API 密钥。")
     
-    # 针对 Google 简化了输入框，默认推荐 flash 模型，速度最快且便宜/免费
     model_name = st.text_input("模型名称 (Model)", value="gemini-2.5-flash", placeholder="例如: gemini-2.5-flash")
     api_key = st.text_input("API Key (密钥)", type="password", placeholder="AIzaSy...")
     
@@ -75,7 +77,6 @@ if 'final_srt' not in st.session_state:
 
 if uploaded_file is not None:
     if st.button("🚀 开始处理 (提取字幕 + AI 翻译)", type="primary"):
-        # 验证 API 必填项
         if not model_name or not api_key:
             st.error("⚠️ 请在左侧边栏填写完整的 Google AI Studio 模型名称和 API Key！")
             st.stop()
@@ -91,11 +92,10 @@ if uploaded_file is not None:
                 tmp_file_path = tmp_file.name
 
             # 步骤 2：使用 Faster-Whisper 提取语音
-            status_text.info("正在使用 faster-whisper 提取原始语音 (这在 CPU 上可能需要一点时间)...")
+            status_text.info("正在使用 faster-whisper 提取原始语音 (CPU 上运行中)...")
             model = load_whisper_model()
             segments, info = model.transcribe(tmp_file_path, beam_size=5)
             
-            # 解析并构建原始字幕列表
             srt_blocks = []
             segment_list = list(segments)
             total_segments = len(segment_list)
@@ -122,7 +122,6 @@ if uploaded_file is not None:
                 
             glossary_instruction = f"请严格遵守以下专业词汇翻译对照表：\n{glossary}\n" if glossary.strip() else ""
 
-            # Gemini 极其擅长角色扮演和语气模仿，这里的提示词专门为 Gemini 做了优化
             system_prompt = f"""你是一个顶级的影视字幕翻译专家，深谙语言背后的语境与角色性格。
 我将发给你一段带有时间轴和序号的 SRT 格式字幕文本。
 【核心要求】
@@ -133,7 +132,6 @@ if uploaded_file is not None:
 5. 输出限制：你的回复必须且只能是符合 SRT 标准格式的纯文本。不要包含 Markdown 代码块标记（如 ```srt），不要附带任何解释性文字或寒暄。"""
 
             # 步骤 4：分块 (Chunking) 翻译逻辑
-            # Gemini 虽然有超大上下文，但在翻译强格式（SRT）文本时，分块依然能最有效防止大模型偷懒漏行
             chunk_size = 35 
             total_chunks = math.ceil(total_segments / chunk_size)
             translated_srt = ""
@@ -148,11 +146,9 @@ if uploaded_file is not None:
                 translated_chunk = process_translation_chunk(client, model_name, chunk_srt_text, system_prompt)
                 translated_srt += translated_chunk + "\n\n"
                 
-                # 更新进度条
                 current_progress = 0.2 + (0.8 * ((chunk_idx + 1) / total_chunks))
                 progress_bar.progress(current_progress)
 
-            # 处理完毕，保存结果到状态并清理临时文件
             st.session_state.final_srt = translated_srt.strip()
             os.remove(tmp_file_path)
             
@@ -169,10 +165,8 @@ if st.session_state.final_srt:
     st.divider()
     st.subheader("📝 翻译结果 (支持直接二次修改)")
     
-    # 超大文本框用于预览和编辑
     edited_srt = st.text_area("字幕预览", value=st.session_state.final_srt, height=500, label_visibility="collapsed")
     
-    # 动态下载按钮
     file_name = uploaded_file.name.rsplit('.', 1)[0] + "_translated.srt" if uploaded_file else "subtitle.srt"
     st.download_button(
         label="⬇️ 一键下载 .srt 文件",
