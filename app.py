@@ -54,16 +54,16 @@ def process_translation_chunk(client, model_name, chunk_srt, system_prompt):
 with st.sidebar:
     st.header("⚙️ Google AI Studio 配置")
     
-    # 使用目前官方稳定支持且不会报 404 的标准模型代号
+    # 适配当前最新的官方模型命名（彻底解决 404）
     model_option = st.selectbox(
         "选择大模型",
-        ["gemini-2.5-flash", "gemini-2.5-pro", "自定义输入模型名称..."],
+        ["gemini-3.7-flash", "gemini-3.1-pro-preview", "自定义输入模型名称..."],
         index=0,
-        help="推荐使用 gemini-2.5-flash，速度快且稳定；若需更强推理可选 gemini-2.5-pro。"
+        help="推荐使用 gemini-3.7-flash，速度极快且稳定；若需复杂深度推理可选 gemini-3.1-pro-preview。"
     )
     
     if model_option == "自定义输入模型名称...":
-        model_name = st.text_input("手动输入模型名称", value="gemini-2.5-flash", placeholder="例如: gemini-2.5-flash")
+        model_name = st.text_input("手动输入模型名称", value="gemini-3.7-flash", placeholder="例如: gemini-3.7-flash")
     else:
         model_name = model_option
 
@@ -77,7 +77,7 @@ with st.sidebar:
         "目标语言 (你想把视频翻译成什么语言？)",
         ["简体中文", "繁体中文", "English", "日本語 (日语)", "한국어 (韩语)"],
         index=0,
-        help="原视频的声音语言由本地 AI 自动识别，此处仅需选择你期望最终看到的译文语言。"
+        help="原视频的声音语言由底部的 faster-whisper 自动识别，此处仅需选择你期望最终看到的译文语言。"
     )
     
     target_style = st.selectbox(
