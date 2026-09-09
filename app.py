@@ -15,7 +15,7 @@ st.markdown("基于 `faster-whisper` + **Google GenAI (零温度严谨翻译模�
 st.sidebar.header("⚙️ 参数配置")
 api_key_input = st.sidebar.text_input("Gemini API Key", type="password", help="请输入您的 Google AI Studio 密钥")
 
-# 模型选择（推荐使用 3.7-flash 或 3.5-flash）
+# 模型选择
 model_options = [
     "gemini-3.7-flash",
     "gemini-3.5-flash",
@@ -33,10 +33,10 @@ def load_whisper_model(size):
 def process_chunk_translation(client, model_name, chunk_text, target_lang):
     """使用绝对零度（temperature=0.0）调用 API，防止模型胡编乱造"""
     system_instruction = f"""你是一个极其严谨、忠实原文的专业影视字幕翻译引擎。
-【核心铁律 - 违者作废】
-1. **严禁胡编乱造**：绝对不允许凭空捏造原文中没有的内容、剧情或对话。
-2. **绝对忠实直译**：必须逐句将输入内容翻译为准确的【{target_lang}】，保持口语的自然但绝不自由发挥。
-3. **格式绝对锁定**：必须原样保留每一个 SRT 的序号和时间轴（格式如 00:00:01,000 --> 00:00:04,000）。输入有多少个块，输出就必须有多少个块，绝对不能合并、拆分或漏掉任何一行。
+【核心铁律】
+1. **严禁胡编乱造**：绝对不允许凭空捏造原文中没有的内容或对话。
+2. **绝对忠实直译**：必须逐句将输入内容翻译为准确的【{target_lang}】，严禁自由发挥。
+3. **格式绝对锁定**：必须原样保留每一个 SRT 的序号和时间轴。输入有多少个块，输出就必须有多少个块，绝对不能合并、拆分或漏掉任何一行。
 4. **纯文本输出**：不要输出任何解释说明、不要加 markdown 代码块标签。"""
 
     try:
@@ -44,7 +44,7 @@ def process_chunk_translation(client, model_name, chunk_text, target_lang):
             model=model_name,
             contents=chunk_text,
             config=types.GenerateContentConfig(
-                temperature=0.0,  # 核心：将创造力降为 0，彻底杜绝幻觉和胡编乱造
+                temperature=0.0,
                 system_instruction=system_instruction
             )
         )
@@ -67,16 +67,15 @@ if uploaded_file is not None:
             st.error("请输入有效的 Gemini API Key。")
         else:
             try:
-                # 1. 语音转写
                 with st.spinner("正在使用 Faster-Whisper 提取语音并对齐时间轴..."):
                     model = load_whisper_model(whisper_size)
                     segments, info = model.transcribe(
                         tfile.name, 
                         beam_size=5,
-                        vad_filter=True,                  # 开启 VAD 过滤无声段
+                        vad_filter=True,
                         vad_parameters=dict(min_silence_duration_ms=500),
                         word_timestamps=True,
-                        condition_on_previous_text=False  # 防止长文本循环幻觉
+                        condition_on_previous_text=False
                     )
                     
                     srt_blocks = []
@@ -98,17 +97,14 @@ if uploaded_file is not None:
                     st.warning("未检测到有效人声。")
                     st.stop()
 
-                # 2. 初始化 Google GenAI 客户端
                 client = genai.Client(api_key=clean_api_key)
                 
-                # 3. 分块安全翻译（每块 25 句，防止大文本模型崩溃或胡言乱语）
                 chunk_size = 25
                 total_segments = len(srt_blocks)
                 total_chunks = math.ceil(total_segments / chunk_size)
                 
                 progress_bar = st.progress(0.0)
                 status_text = st.empty()
-                
                 final_translated_srt = []
                 
                 for chunk_idx in range(total_chunks):
@@ -124,7 +120,6 @@ if uploaded_file is not None:
                     progress_bar.progress((chunk_idx + 1) / total_chunks)
                 
                 complete_result = "\n\n".join(final_translated_srt)
-                
                 status_text.success("🎉 转写与严谨翻译全部完成！")
                 
                 st.subheader("📝 翻译结果校对")
