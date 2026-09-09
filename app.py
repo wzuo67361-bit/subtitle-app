@@ -27,11 +27,11 @@ def format_timestamp(seconds: float) -> str:
 
 @st.cache_resource
 def load_whisper_model():
+    """缓存加载 Faster-Whisper 模型，防止重复消耗资源"""
     return WhisperModel("base", device="cpu", compute_type="int8")
 
 def process_translation_chunk(model_name, chunk_srt, system_prompt):
     """带自动降级容错的翻译引擎"""
-    # 如果选中的模型报错(如已被官方临时下线)，自动向下回退尝试更稳定的版本
     fallback_chain = [model_name, "gemini-3.7-flash", "gemini-3.5-flash"]
     unique_models = []
     for m in fallback_chain:
@@ -86,7 +86,7 @@ with st.sidebar:
         "gemini-3.8-flash-preview": "Gemini 3.8 Flash (最新预览版：尝鲜极速通道)",
         "gemini-3.6-flash": "Gemini 3.6 Flash (上一代主力版：备用稳定节点)",
         "gemini-3.5-flash": "Gemini 3.5 Flash (经典闪电版：兼容性最强)",
-        "gemini-3.1-pro-preview": "Gemini 3.1 Pro (深度推理版：适合处理极复杂的俚语和专业术语)",
+        "gemini-3.1-pro-preview": "Gemini 3.1 Pro (深度推理版：适合复杂俚语和专业术语)",
         "自定义输入模型名称...": "自定义模型名称（防止官方更新改名）"
     }
     
@@ -96,14 +96,12 @@ with st.sidebar:
     if selected_display == "自定义模型名称（防止官方更新改名）":
         model_name = st.text_input("手动输入模型名称", value="gemini-3.7-flash")
     else:
-        # 通过字典反查对应的真实模型代号
         model_name = list(model_options.keys())[list(model_options.values()).index(selected_display)]
         
     with st.expander("ℹ️ 选哪个模型好？(模型须知)"):
         st.markdown("""
         * **Flash 系列 (3.5/3.6/3.7/3.8)**：专为高频并发设计，**免费配额最高**，翻译视频字幕这种任务用 Flash 完全足够且速度最快，首选 **3.7-flash**。
         * **Pro 系列 (3.1-pro)**：逻辑理解能力最强，但**免费调用额度较少**（容易超出限制报错）。如果视频包含大量晦涩的行业黑话或古语，可切到此模型。
-        * **注意**：Google 会不定期废弃老模型（如 1.5 或 2.5），若提示 404，请切换为更新的版本或手动输入官方最新名称。
         """)
 
     st.divider()
@@ -125,7 +123,7 @@ with st.sidebar:
 
 # ----------------- 主界面 -----------------
 
-st.title("🎬 音视频字幕生成与翻译 (Gemini 3.x 世代)")
+st.title("🎬 音视频字幕生成与翻译 (终极高精度版)")
 st.markdown("基于本地 `faster-whisper` + 云端最新 **Google AI (Gemini 3.x)** 驱动的防失联翻译引擎。")
 
 uploaded_file = st.file_uploader("📂 上传音视频文件", type=["mp4", "mp3", "wav", "m4a"])
@@ -151,9 +149,20 @@ if uploaded_file is not None:
                 tmp_file.write(uploaded_file.read())
                 tmp_file_path = tmp_file.name
 
-            status_text.info("正在使用 faster-whisper 提取原始语音...")
+            # ----------------- 高精度时间轴优化核心 -----------------
+            status_text.info("正在使用 faster-whisper 提取原始语音 (已开启 VAD 与高精度时间轴)...")
             model = load_whisper_model()
-            segments, info = model.transcribe(tmp_file_path, beam_size=5)
+            
+            segments, info = model.transcribe(
+                tmp_file_path, 
+                beam_size=5,
+                vad_filter=True,                  # 开启 VAD 过滤非人声
+                vad_parameters=dict(
+                    min_silence_duration_ms=500   # 停顿 500 毫秒即强制断句
+                ),
+                word_timestamps=True,             # 开启词级精准对齐
+                condition_on_previous_text=False  # 防止长视频时间轴漂移和重复幻觉
+            )
             
             srt_blocks = []
             segment_list = list(segments)
