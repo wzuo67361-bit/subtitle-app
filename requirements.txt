@@ -7,3 +7,4 @@ torch
 torchaudio
 pillow
 pip install pandas openpyxl
+openai
