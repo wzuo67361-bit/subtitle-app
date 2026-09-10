@@ -1,10 +1,6 @@
 streamlit
 faster-whisper
 google-genai
-imageio-ffmpeg
-pyannote.audio
-torch
-torchaudio
 pillow
-pip install pandas openpyxl
-openai
+pandas
+openpyxl
