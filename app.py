@@ -1,186 +1,222 @@
-import os
-import tempfile
-import math
 import streamlit as st
 from faster_whisper import WhisperModel
-from google import genai
-from google.genai import types
+from openai import OpenAI
+import tempfile
+import os
+import math
+import re
 
-# 尝试导入说话人分离库
-try:
-    from pyannote.audio import Pipeline
-    DIARIZATION_AVAILABLE = True
-except ImportError:
-    DIARIZATION_AVAILABLE = False
+# --- 页面配置 ---
+st.set_page_config(page_title="音视频字幕生成与翻译", page_icon="🎬", layout="wide")
+st.title("🎬 音视频字幕生成与翻译 Web 应用")
+st.markdown("极简操作：选模型 -> 填密钥 -> 上传视频 -> 自动出双语字幕。")
 
-st.set_page_config(page_title="男女声双语对照与防幻觉字幕翻译", layout="wide")
+# --- 侧边栏配置区 ---
+st.sidebar.header("⚙️ 选项配置")
 
-st.title("🎙️ 男女声精准分离与日中双语对照防幻觉翻译")
-st.markdown("基于 `faster-whisper` + 说话人分离 + **Gemini 零幻觉双语对照引擎**，完美输出【日文原文 + 中文翻译】双语字幕。")
+# ==========================================
+# 1. 傻瓜式模型选择 (底层自动路由，无需填网址)
+# ==========================================
+st.sidebar.subheader("1. 选择翻译大模型")
 
-# 侧边栏配置
-st.sidebar.header("⚙️ 参数配置与模型选择")
+# 核心路由字典：将模型名称自动映射到对应的官方网址
+MODEL_ROUTING_MAP = {
+    # --- Google Gemini 家族 (2026最新版) ---
+    "gemini-3.8-flash": "https://generativelanguage.googleapis.com/v1beta/openai/",
+    "gemini-3.5-flash": "https://generativelanguage.googleapis.com/v1beta/openai/",
+    "gemini-2.5-flash": "https://generativelanguage.googleapis.com/v1beta/openai/",
+    "gemini-1.5-pro": "https://generativelanguage.googleapis.com/v1beta/openai/",
+    "gemini-1.5-flash": "https://generativelanguage.googleapis.com/v1beta/openai/",
+    "gemini-pro": "https://generativelanguage.googleapis.com/v1beta/openai/",
+    
+    # --- 国内顶级大厂 ---
+    "deepseek-chat (深度求索)": "https://api.deepseek.com/v1",
+    "moonshot-v1-8k (Kimi)": "https://api.moonshot.cn/v1",
+    "qwen-plus (阿里通义千问)": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    
+    # --- 硅基流动 (永久免费开源模型) ---
+    "Qwen/Qwen2.5-7B-Instruct (硅基流动免费版)": "https://api.siliconflow.cn/v1"
+}
+
+# 让用户直接在下拉菜单选模型
+selected_display_name = st.sidebar.selectbox(
+    "请直接选择你要用的模型：", 
+    list(MODEL_ROUTING_MAP.keys())
+)
+
+# 代码底层自动获取对应的网址和真实的模型名
+auto_base_url = MODEL_ROUTING_MAP[selected_display_name]
+# 清理显示名称，提取真实的模型ID传给服务器
+actual_model_id = selected_display_name.split(" ")[0] 
+
+# 唯一的输入框：API Key
 api_key_input = st.sidebar.text_input("Gemini API Key", type="password", help="请输入您的 Google AI Studio 密钥")
 
-# 完整模型池选单
-model_options = [
-    "gemini-3.8-flash",
-    "gemini-3.7-flash",
-    "gemini-3.6-flash",
-    "gemini-3.5-flash",
-    "gemini-3.5-flash-lite",
-    "gemini-3.5-transcribe",
-    "gemini-3-flash",
-    "gemini-3.1-flash-lite",
-    "gemini-3.1-flash-tts",
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-flash-tts"
-]
-model_choice = st.sidebar.selectbox("选择 Gemini 模型（如遇超限可自由切换）", model_options, index=3)
+# ==========================================
+# 2. 语言与字幕选项
+# ==========================================
+st.sidebar.subheader("2. 字幕设置")
+source_lang = st.sidebar.selectbox("视频源语言", ["ja (日语)", "auto (自动识别)", "en (英语)", "zh (中文)"], index=0)
 
-# 模型大小与目标语言
-whisper_size = st.sidebar.selectbox("Whisper 模型大小（云端服务器推荐 base/small）", ["tiny", "base", "small", "medium"], index=1)
-target_language = st.sidebar.selectbox("翻译目标语言", ["简体中文", "繁体中文", "English"], index=0)
+target_option = st.sidebar.selectbox(
+    "目标字幕选项",
+    [
+        "仅生成日文原字幕 (SRT)",
+        "翻译为简体中文 (SRT)",
+        "翻译为英文 (SRT)",
+        "生成【日/中】双语对照字幕 (SRT)",
+        "生成【日/英】双语对照字幕 (SRT)"
+    ]
+)
 
-hf_token = st.sidebar.text_input("HuggingFace Token (可选，用于高级说话人分离)", type="password")
+# ==========================================
+# 3. 专业词汇校正
+# ==========================================
+st.sidebar.subheader("3. 专业词汇/专有名词校正")
+glossary = st.sidebar.text_area(
+    "输入翻译对照（如：人名、术语），每行一个",
+    placeholder="例如：\n山田太郎 -> Yamada Taro\n术语A -> Term A",
+    height=100
+)
+
+# --- 核心处理函数 ---
+
+def format_timestamp(seconds: float):
+    hours = math.floor(seconds / 3600)
+    seconds %= 3600
+    minutes = math.floor(seconds / 60)
+    seconds %= 60
+    milliseconds = round((seconds - math.floor(seconds)) * 1000)
+    seconds = math.floor(seconds)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
 
 @st.cache_resource
-def load_whisper_model(size):
-    return WhisperModel(size, device="cpu", compute_type="int8")
+def load_whisper_model():
+    return WhisperModel("base", device="cpu", compute_type="int8")
 
-def translate_bilingual_continuously(client, model_name, srt_blocks, target_lang):
-    """强制要求输出日文原文与中文翻译的双语对照格式，保持上下文连贯，杜绝幻觉"""
-    full_text = "\n".join(srt_blocks)
+def call_llm_translator(prompt_text, user_content, key, url, model):
+    """统一的大模型调用通道"""
+    try:
+        client = OpenAI(api_key=key.strip(), base_url=url.strip())
+        response = client.chat.completions.create(
+            model=model.strip(),
+            messages=[
+                {"role": "system", "content": prompt_text},
+                {"role": "user", "content": user_content}
+            ],
+            temperature=0.3
+        )
+        result = response.choices[0].message.content.strip()
+        result = re.sub(r'^```(?:srt|text)?\n', '', result)
+        return re.sub(r'\n```$', '', result)
+    except Exception as e:
+        return f"翻译出错: {str(e)}"
+
+# --- 主界面执行逻辑 ---
+
+st.write("### 📤 第一步：上传音视频文件")
+uploaded_file = st.file_uploader("支持 MP4, MP3, WAV, M4A 等主流音视频格式", type=['mp4', 'mp3', 'wav', 'm4a'])
+
+if st.button("🚀 开始生成与翻译", type="primary", use_container_width=True):
+    if not uploaded_file:
+        st.warning("⚠️ 请先上传音视频文件！")
+        st.stop()
     
-    system_instruction = f"""你是一个顶级的影视双语字幕翻译大师。
-【核心任务】
-将以下带有时间轴和 [男] / [女] 标签的日文语音转写文本，翻译并排版为【双语对照字幕】。
+    if "翻译" in target_option or "双语" in target_option:
+        if not api_key:
+            st.warning("⚠️ 请在左侧填入 API Key！")
+            st.stop()
+            
+        # 严谨拦截绝对不可用的 AQ. 密钥，防止用户白白等待报错
+        if api_key.strip().startswith("AQ."):
+            st.error("🚨 密钥错误：检测到 `AQ.` 开头的谷歌企业云令牌！\n\n该令牌缺少项目编号，绝对无法在此网页使用。请去申请 `AIzaSy` 开头的谷歌官方密钥，或使用 `sk-` 开头的国内密钥！")
+            st.stop()
 
-【输出格式铁律】
-每一句字幕必须包含原文与翻译，格式如下所示（注意保留序号、时间轴和男女标签）：
-序号
-时间轴
-[男/女] 日文原文
-[男/女] {target_lang}翻译
-
-【绝对铁律】
-1. **严格保持时间轴与结构**：绝对不能改变每一句的序号和 `00:00:00,000 --> 00:00:00,000` 时间轴格式。
-2. **双语必须完整**：每一行文本都要同时呈现日文原句和对应的{target_lang}翻译，缺一不可。
-3. **拒绝幻觉与机翻感**：必须结合上下文语境进行信达雅的翻译，严禁胡编乱造。
-4. **纯文本输出**：不要输出任何解释说明、不要加 markdown 代码块标签，直接输出符合 SRT 格式的文本。"""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
+        tmp_file.write(uploaded_file.read())
+        tmp_file_path = tmp_file.name
 
     try:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=f"请将以下日文字幕处理为双语对照格式：\n\n{full_text}",
-            config=types.GenerateContentConfig(
-                temperature=0.1,
-                system_instruction=system_instruction
-            )
-        )
-        return response.text.strip().replace("```srt", "").replace("```", "")
-    except Exception as e:
-        return f"[翻译调用出错 ({model_name}): {str(e)}]\n{full_text}"
+        st.write("### ⏳ 第二步：处理进度")
+        progress_bar = st.progress(0)
+        status_text = st.empty()
 
-uploaded_file = st.file_uploader("上传音视频文件", type=["mp4", "mkv", "mov", "avi", "mp3", "wav", "m4a"])
+        # 1. Faster-Whisper 音频提取
+        status_text.info("🎧 正在使用 faster-whisper 提取原字幕 (请稍候)...")
+        model = load_whisper_model()
+        lang_code = source_lang.split(" ")[0]
+        lang_param = None if lang_code == "auto" else lang_code
+        
+        segments, info = model.transcribe(tmp_file_path, language=lang_param, beam_size=5)
+        
+        original_srt_lines = []
+        for i, segment in enumerate(segments, start=1):
+            start_time = format_timestamp(segment.start)
+            end_time = format_timestamp(segment.end)
+            text = segment.text.strip()
+            original_srt_lines.append(f"{i}\n{start_time} --> {end_time}\n{text}\n")
+            
+        original_srt_text = "\n".join(original_srt_lines)
+        progress_bar.progress(50)
 
-if uploaded_file is not None:
-    tfile = tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1])
-    tfile.write(uploaded_file.read())
-    tfile.close()
-    
-    st.audio(tfile.name)
-    
-    if st.button("🚀 开始精准分离、转写与双语对照翻译", type="primary"):
-        clean_api_key = api_key_input.strip()
-        if not clean_api_key:
-            st.error("请输入有效的 Gemini API Key。")
-        else:
-            try:
-                speakers_map = {}
-                speaker_segments = []
+        # 2. AI 智能翻译与语气校正
+        final_srt_text = original_srt_text
+        
+        if "翻译" in target_option or "双语" in target_option:
+            status_text.info(f"🧠 正在调用大模型 ({actual_model_id}) 深入解析对话与语气...")
+            
+            system_prompt = f"""你是一个顶级的影视字幕翻译专家。目标任务：{target_option}。
+专业词汇校对对照表：\n{glossary}
+
+【核心翻译原则 - 智能角色与语气还原】：
+1. 必须通盘理解日文上下文，根据自称（俺、僕、私、あたし等）、句尾终助词（わ、ぜ、ぞ、かしら等）以及敬语/简体的差异，精准推断说话人的性别与身份关系。
+2. 翻译出的译文必须符合该角色的性格与语气！男性台词坚决展现男人口吻，女性台词体现女性口吻，坚决杜绝生硬机翻。
+3. 严格保留原有的 SRT 序号和时间轴格式（如 1 \\n 00:00:01,000 --> 00:00:04,000）。
+4. 若选择双语，第一行为原文，第二行为译文。
+5. 绝对不要输出任何 Markdown 标记（如 ```srt），直接输出纯文本。"""
+
+            chunk_size = 35
+            translated_srt_pieces = []
+            total_chunks = math.ceil(len(original_srt_lines) / chunk_size)
+            
+            for i in range(total_chunks):
+                chunk_lines = original_srt_lines[i*chunk_size : (i+1)*chunk_size]
+                chunk_text = "\n".join(chunk_lines)
+                status_text.info(f"🧠 正在翻译第 {i+1}/{total_chunks} 组字幕 (角色语气分析中)...")
                 
-                with st.spinner("正在进行说话人特征声音分析与分离..."):
-                    if DIARIZATION_AVAILABLE:
-                        try:
-                            pipeline_token = hf_token.strip() if hf_token else None
-                            diarization_pipeline = Pipeline.from_pretrained(
-                                "pyannote/speaker-diarization-3.1",
-                                use_auth_token=pipeline_token if pipeline_token else True
-                            )
-                            diarization = diarization_pipeline(tfile.name)
-                            for turn, _, speaker in diarization.itertracks(yield_label=True):
-                                speaker_segments.append((turn.start, turn.end, speaker))
-                        except Exception as diar_err:
-                            st.warning(f"高级说话人分离降级：{diar_err}，将使用智能交替与音高特征标记。")
-                    
-                with st.spinner("正在使用 Faster-Whisper 高精度提取日文文本与时间轴对齐..."):
-                    model = load_whisper_model(whisper_size)
-                    segments, info = model.transcribe(
-                        tfile.name, 
-                        beam_size=5,
-                        vad_filter=True,
-                        vad_parameters=dict(min_silence_duration_ms=500),
-                        condition_on_previous_text=False
-                    )
-                    
-                    segment_list = list(segments)
-                    srt_blocks = []
-                    
-                    for i, segment in enumerate(segment_list, start=1):
-                        seg_start = segment.start
-                        seg_end = segment.end
-                        text = segment.text.strip()
-                        
-                        speaker_label = "[未知]"
-                        if speaker_segments:
-                            for (d_start, d_end, spk) in speaker_segments:
-                                if max(seg_start, d_start) < min(seg_end, d_end):
-                                    if spk not in speakers_map:
-                                        speakers_map[spk] = "男" if len(speakers_map) == 0 else "女"
-                                    speaker_label = f"[{speakers_map[spk]}]"
-                                    break
-                        else:
-                            speaker_label = "[男]" if i % 2 != 0 else "[女]"
-
-                        def format_time(seconds):
-                            hours = int(seconds // 3600)
-                            minutes = int((seconds % 3600) // 60)
-                            secs = int(seconds % 60)
-                            millis = int((seconds - int(seconds)) * 1000)
-                            return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
-                        
-                        start_str = format_time(seg_start)
-                        end_str = format_time(seg_end)
-                        
-                        block_text = f"{i}\n{start_str} --> {end_str}\n{speaker_label} {text}"
-                        srt_blocks.append(block_text)
+                # 底层自动使用映射好的网址和模型名进行请求
+                translated_chunk = call_llm_translator(system_prompt, chunk_text, api_key, auto_base_url, actual_model_id)
                 
-                if not srt_blocks:
-                    st.warning("未检测到有效人声内容。")
+                if "翻译出错" in translated_chunk:
+                    st.error(translated_chunk)
                     st.stop()
+                    
+                translated_srt_pieces.append(translated_chunk)
+                current_progress = 50 + int(50 * ((i + 1) / total_chunks))
+                progress_bar.progress(current_progress)
+                
+            final_srt_text = "\n\n".join(translated_srt_pieces)
+        else:
+            progress_bar.progress(100)
 
-                client = genai.Client(api_key=clean_api_key)
-                
-                with st.spinner(f"正在使用模型 [{model_choice}] 进行日中双语对照与防幻觉连贯翻译..."):
-                    complete_result = translate_bilingual_continuously(client, model_choice, srt_blocks, target_language)
-                
-                st.success("🎉 男女声分离与双语对照翻译全部完成！")
-                
-                st.subheader("📝 双语精校版字幕预览（含日文原文与中文对照）")
-                st.text_area("SRT 内容预览", complete_result, height=450)
-                
-                st.download_button(
-                    label="📥 下载双语对照 .srt 字幕文件",
-                    data=complete_result,
-                    file_name=uploaded_file.name.rsplit('.', 1)[0] + "_bilingual.srt",
-                    mime="text/plain",
-                    type="primary"
-                )
-                
-            except Exception as e:
-                st.error(f"处理过程中发生错误: {e}")
-            finally:
-                if os.path.exists(tfile.name):
-                    os.remove(tfile.name)
+        status_text.success("✅ 全部处理完成！请在下方预览并下载字幕。")
+
+        # 3. 预览与下载
+        st.write("---")
+        st.write("### 👀 第三步：字幕预览与下载")
+        st.text_area("字幕内容确认区（可直接在此处二次编辑）：", final_srt_text, height=400)
+        
+        st.download_button(
+            label="⬇️ 一键下载 .srt 字幕文件",
+            data=final_srt_text,
+            file_name=f"{os.path.splitext(uploaded_file.name)[0]}_subtitle.srt",
+            mime="text/plain",
+            type="primary",
+            use_container_width=True
+        )
+
+    except Exception as e:
+        st.error(f"❌ 处理过程中发生异常: {str(e)}")
+    finally:
+        if os.path.exists(tmp_file_path):
+            os.remove(tmp_file_path)
