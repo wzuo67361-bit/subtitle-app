@@ -63,11 +63,10 @@ def load_whisper_model(size):
     return WhisperModel(size, device="cpu", compute_type="int8")
 
 # ================= 核心功能选项卡（Tabs） =================
-# 将界面分为三个标签页，互不干扰
 tab1, tab2, tab3 = st.tabs(["🎙️ 音视频双语字幕", "🖼️ 图片精准翻译", "🤖 AI 纠错与答疑助手"])
 
 
-# ------------------ Tab 1: 音视频双语字幕（原有优化版逻辑） ------------------
+# ------------------ Tab 1: 音视频双语字幕 ------------------
 with tab1:
     st.subheader("处理音视频并生成双语对照字幕")
     uploaded_file = st.file_uploader("上传音视频文件", type=["mp4", "mkv", "mov", "avi", "mp3", "wav", "m4a"], key="media_uploader")
@@ -174,7 +173,8 @@ with tab2:
             try:
                 client = genai.Client(api_key=clean_api_key)
                 image = Image.open(img_file)
-                st.image(image, caption="原始图片", use_column_width=True)
+                # 修复核心：将旧版 use_column_width 改为新版 use_container_width
+                st.image(image, caption="原始图片", use_container_width=True)
                 
                 with st.spinner(f"正在使用大模型精准读取图片并翻译为 {target_language}..."):
                     img_prompt = f"请精准提取这张图片中的所有文字，并将其准确无误地翻译成【{target_language}】。要求：1. 先列出图片原文；2. 接着列出准确的翻译；3. 保持排版清晰，绝对不要幻觉或凭空捏造图片中没有的文字。"
@@ -182,7 +182,7 @@ with tab2:
                     response = client.models.generate_content(
                         model=model_choice,
                         contents=[image, img_prompt],
-                        config=types.GenerateContentConfig(temperature=0.1) # 低温保证精准度
+                        config=types.GenerateContentConfig(temperature=0.1)
                     )
                     st.success("✅ 图片翻译完成！")
                     st.markdown("### 📝 翻译结果")
@@ -194,22 +194,18 @@ with tab2:
 # ------------------ Tab 3: AI 纠错与答疑助手 ------------------
 with tab3:
     st.subheader("🤖 AI 纠错与翻译答疑助手")
-    st.info("💡 **使用提示**：如果字幕翻译偶尔只出了日文原文，或者你觉得哪句话翻译得怪怪的，请直接把那句日文复制粘贴在下方，并告诉 AI '请帮我准确翻译这句话'。你也可以问它任何问题。")
+    st.info("💡 **使用提示**：如果字幕翻译偶尔只出了日文原文，或者你觉得哪句话翻译得怪怪的，请直接把那句日文复制粘贴在下方，并告诉 AI '请帮我准确翻译这句话'。")
     
-    # 初始化聊天历史记录
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
-    # 显示聊天记录
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # 聊天输入框
     if prompt := st.chat_input("请粘贴需要重新翻译的日文，或输入您的问题..."):
         clean_api_key = api_key_input.strip()
         
-        # 保存并显示用户消息
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
@@ -223,7 +219,6 @@ with tab3:
                     try:
                         client = genai.Client(api_key=clean_api_key)
                         
-                        # 组合简易的系统提示以防幻觉
                         chat_sys_inst = "你是一个专业的人工智能翻译官与助手。请精准回答用户的问题或提供准确的外语翻译，严禁产生幻觉或胡编乱造。"
                         
                         chat_response = client.models.generate_content(
