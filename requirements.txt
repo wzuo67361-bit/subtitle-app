@@ -6,3 +6,4 @@ pyannote.audio
 torch
 torchaudio
 pillow
+pip install pandas openpyxl
