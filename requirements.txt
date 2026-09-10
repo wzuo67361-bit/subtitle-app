@@ -5,3 +5,4 @@ imageio-ffmpeg
 pyannote.audio
 torch
 torchaudio
+pillow
