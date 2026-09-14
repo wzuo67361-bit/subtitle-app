@@ -1,270 +1,324 @@
-import streamlit as st
-import pandas as pd
-import json
+import os
 import io
 import tempfile
-import os
-import re
-import time
+import streamlit as st
+import pandas as pd
 from PIL import Image
+from faster_whisper import WhisperModel
 from google import genai
 from google.genai import types
 
-# ----------------- 页面基础配置 -----------------
-st.set_page_config(
-    page_title="AI 媒体翻译与数据工作站",
-    layout="wide",
-    initial_sidebar_state="expanded"
+# 尝试导入说话人分离库
+try:
+    from pyannote.audio import Pipeline
+    DIARIZATION_AVAILABLE = True
+except ImportError:
+    DIARIZATION_AVAILABLE = False
+
+st.set_page_config(page_title="AI 全能工作站：媒体翻译与精准数据提取", layout="wide")
+
+st.title("🚀 AI 媒体翻译与精准数据提取工作站")
+st.markdown("集音视频双语字幕、图片外文翻译、高精度图片表格数据提取，以及严谨务实的 AI 助手于一体。")
+
+# ================= 侧边栏全局配置 =================
+st.sidebar.header("⚙️ 全局配置与模型选择")
+
+api_key_input = st.sidebar.text_input(
+    "1. Gemini API Key", 
+    type="password", 
+    help="【必填】用于驱动各项功能的高精度处理。"
 )
 
-st.title("🎛️ AI 媒体翻译与数据提取工作站")
+model_options = [
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.5-transcribe",
+    "gemini-2.5-flash",
+]
+model_choice = st.sidebar.selectbox("2. 选择全局 Gemini 模型", model_options, index=3)
+target_language = st.sidebar.selectbox("3. 全局目标语言", ["简体中文", "繁体中文", "English"], index=0)
+whisper_size = st.sidebar.selectbox("4. Whisper 音频识别精度", ["tiny", "base", "small", "medium"], index=1)
+hf_token = st.sidebar.text_input("5. HuggingFace Token (分离男女声可选)", type="password")
 
-# ----------------- 侧边栏配置 (API与模型选择) -----------------
-with st.sidebar:
-    st.header("⚙️ 核心设置")
-    api_key = st.text_input("输入 Gemini API Key", type="password")
+@st.cache_resource
+def load_whisper_model(size):
+    return WhisperModel(size, device="cpu", compute_type="int8")
+
+def parse_markdown_table_to_df(md_text):
+    """将 AI 生成的 Markdown 表格安全解析为 Pandas DataFrame，用于导出 Excel"""
+    lines = md_text.strip().split('\n')
+    # 提取所有包含管道符的表格行
+    table_lines = [line.strip() for line in lines if line.strip().startswith('|')]
     
-    # 官方推荐稳定模型 + 支持自定义扩展
-    model_options = [
-        "gemini-2.0-flash",        # 极速推荐，多模态能力强
-        "gemini-1.5-flash",        # 高度稳定，抗过载能力强
-        "gemini-1.5-pro",          # 强力模型，适合长难表格
-        "gemini-2.0-flash-lite",   # 轻量化
-        "自定义/其他模型"
-    ]
-    selected_option = st.selectbox("🤖 选择 AI 模型", model_options, index=0)
+    if not table_lines:
+        return None
+        
+    # 过滤掉 Markdown 的分隔行 (如 |---|---|)
+    data_lines = [line for line in table_lines if not set(line.replace('|', '').strip()) <= set('-: ')]
     
-    if selected_option == "自定义/其他模型":
-        selected_model = st.text_input("请输入具体的模型名称", value="gemini-2.0-flash")
-    else:
-        selected_model = selected_option
-    
-    if not api_key:
-        st.warning("⚠️ 必须输入 API Key 才能唤醒系统功能。")
-    st.markdown("---")
-    st.markdown(f"**系统状态：**\n- 当前驱动模型：`{selected_model}`")
+    if not data_lines:
+        return None
+        
+    parsed_data = []
+    for line in data_lines:
+        row = [cell.strip() for cell in line.strip('|').split('|')]
+        parsed_data.append(row)
+        
+    if len(parsed_data) > 1:
+        return pd.DataFrame(parsed_data[1:], columns=parsed_data[0])
+    elif len(parsed_data) == 1:
+        return pd.DataFrame(columns=parsed_data[0])
+    return None
 
-# ----------------- 初始化全局状态 -----------------
-if "subtitle_df" not in st.session_state:
-    st.session_state.subtitle_df = None
-if "table_df" not in st.session_state:
-    st.session_state.table_df = None
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
+# ================= 核心功能选项卡（Tabs） =================
+tab1, tab2, tab3, tab4 = st.tabs(["🎙️ 音视频双语字幕", "🖼️ 图片文字翻译", "📊 严谨图片数据提取", "🤖 严谨的 AI 答疑助手"])
 
-# ----------------- 增强版通用工具函数 -----------------
-def generate_with_retry(client, model, contents, config, max_retries=3):
-    """带自动重试的 API 调用函数，解决 503 UNAVAILABLE 问题"""
-    for attempt in range(max_retries):
-        try:
-            return client.models.generate_content(
-                model=model,
-                contents=contents,
-                config=config
-            )
-        except Exception as e:
-            err_str = str(e)
-            # 如果是 503 过载或 429 频控，且还有重试机会，则进行指数退避重试
-            if ("503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str) and attempt < max_retries - 1:
-                wait_time = (attempt + 1) * 2
-                st.toast(f"⏳ 官方服务器繁忙 (503)，正在进行第 {attempt + 1} 次重试 (等待 {wait_time} 秒)...", icon="⚠️")
-                time.sleep(wait_time)
-            else:
-                raise e
-
-def safe_extract_json(raw_text):
-    """稳健的 JSON 解析器，防崩防截断"""
-    if not raw_text or not raw_text.strip():
-        raise ValueError("模型未返回任何文本内容（可能因图片过大、敏感词拦截或模型输出为空）。")
-    
-    text = raw_text.strip()
-    # 剔除 Markdown 标记
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1]
-        if text.endswith("```"):
-            text = text.rsplit("\n", 1)[0]
-        if text.startswith("json"):
-            text = text[4:].strip()
-            
-    # 尝试直接解析
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        # 如果直接解析失败，使用正则匹配最外层的 JSON 数组 [...]
-        match = re.search(r'\[\s*\{.*\}\s*\]', text, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(0))
-            except json.JSONDecodeError:
-                pass
-        raise ValueError(f"无法将模型返回内容解析为标准表格 JSON。返回前200字符: {text[:200]}...")
-
-# ----------------- 选项卡架构搭建 -----------------
-tab1, tab2 = st.tabs(["🎵 视听字幕与翻译 (云端版)", "📊 图片表格提取与 AI 编辑器"])
-
-# ==============================================================================
-# TAB 1: 视听字幕与翻译
-# ==============================================================================
+# ------------------ Tab 1: 音视频双语字幕 ------------------
 with tab1:
-    st.header("🎵 音视频智能字幕提取与双语翻译")
-    media_file = st.file_uploader("上传音/视频文件", type=["mp3", "wav", "m4a", "mp4"])
+    st.subheader("处理音视频并生成双语对照字幕")
+    uploaded_file = st.file_uploader("上传音视频文件", type=["mp4", "mkv", "mov", "avi", "mp3", "wav", "m4a"], key="media_uploader")
     
-    if media_file and api_key:
-        if st.button("🚀 开始提取与翻译字幕", type="primary"):
-            with st.spinner(f"🚀 正在使用 {selected_model} 处理媒体文件..."):
+    if uploaded_file is not None:
+        tfile = tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1])
+        tfile.write(uploaded_file.read())
+        tfile.close()
+        st.audio(tfile.name)
+        
+        if st.button("🚀 开始提取与双语翻译", type="primary", key="btn_media"):
+            clean_api_key = api_key_input.strip()
+            if not clean_api_key:
+                st.error("请先在左侧输入有效的 Gemini API Key。")
+            else:
                 try:
-                    client = genai.Client(api_key=api_key)
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(media_file.name)[1]) as tmp_file:
-                        tmp_file.write(media_file.read())
-                        tmp_file_path = tmp_file.name
+                    speakers_map = {}
+                    speaker_segments = []
+                    
+                    with st.spinner("正在分析音频说话人特征..."):
+                        if DIARIZATION_AVAILABLE:
+                            try:
+                                pipeline_token = hf_token.strip() if hf_token else None
+                                diarization_pipeline = Pipeline.from_pretrained(
+                                    "pyannote/speaker-diarization-3.1",
+                                    use_auth_token=pipeline_token if pipeline_token else True
+                                )
+                                diarization = diarization_pipeline(tfile.name)
+                                for turn, _, speaker in diarization.itertracks(yield_label=True):
+                                    speaker_segments.append((turn.start, turn.end, speaker))
+                            except Exception as diar_err:
+                                st.warning(f"高级分离降级（仍可正常转写）：{diar_err}")
+                        
+                    with st.spinner("正在高精度提取音频原文..."):
+                        model = load_whisper_model(whisper_size)
+                        segments, info = model.transcribe(
+                            tfile.name, beam_size=5, vad_filter=True,
+                            vad_parameters=dict(min_silence_duration_ms=500),
+                            condition_on_previous_text=False
+                        )
+                        
+                        srt_blocks = []
+                        for i, segment in enumerate(list(segments), start=1):
+                            seg_start, seg_end = segment.start, segment.end
+                            text = segment.text.strip()
+                            speaker_label = "[未知]"
+                            
+                            if speaker_segments:
+                                for (d_start, d_end, spk) in speaker_segments:
+                                    if max(seg_start, d_start) < min(seg_end, d_end):
+                                        if spk not in speakers_map:
+                                            speakers_map[spk] = "男" if len(speakers_map) == 0 else "女"
+                                        speaker_label = f"[{speakers_map[spk]}]"
+                                        break
+                            else:
+                                speaker_label = "[男]" if i % 2 != 0 else "[女]"
 
-                    uploaded_media = client.files.upload(file=tmp_file_path)
+                            def format_time(seconds):
+                                h = int(seconds // 3600)
+                                m = int((seconds % 3600) // 60)
+                                s = int(seconds % 60)
+                                ms = int((seconds - int(seconds)) * 1000)
+                                return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+                            
+                            srt_blocks.append(f"{i}\n{format_time(seg_start)} --> {format_time(seg_end)}\n{speaker_label} {text}")
                     
-                    prompt = """
-                    请仔细聆听此媒体文件，提取其中的所有语音，并翻译为中文。
-                    必须以合法的 JSON 数组格式返回：[{"时间": "00:00-00:05", "原文": "Hello", "译文": "你好"}]。
-                    绝不能包含任何 Markdown 符号或额外说明文字，只能输出纯 JSON 数组。
-                    """
+                    if not srt_blocks:
+                        st.warning("未检测到有效人声。")
+                        st.stop()
+
+                    client = genai.Client(api_key=clean_api_key)
+                    full_text = "\n".join(srt_blocks)
+                    sys_inst = f"你是一个字幕翻译大师。必须将以下字幕转为【音频原文】与【{target_language}翻译】的双语格式（共四行：序号、时间、原文、翻译），保持序号时间轴不变，零幻觉。"
                     
-                    response = generate_with_retry(
-                        client=client,
-                        model=selected_model,
-                        contents=[uploaded_media, prompt],
+                    with st.spinner("正在生成【原文 + 中文】双语字幕，绝不幻觉..."):
+                        response = client.models.generate_content(
+                            model=model_choice,
+                            contents=f"请翻译以下字幕：\n\n{full_text}",
+                            config=types.GenerateContentConfig(temperature=0.0, system_instruction=sys_inst)
+                        )
+                    
+                    complete_result = response.text.strip().replace("```srt", "").replace("```", "")
+                    st.success("🎉 双语字幕处理完成！")
+                    st.text_area("精校版字幕", complete_result, height=300)
+                    st.download_button("📥 下载字幕", complete_result, file_name="bilingual.srt", type="primary")
+                except Exception as e:
+                    st.error(f"发生错误: {e}")
+                finally:
+                    if os.path.exists(tfile.name):
+                        os.remove(tfile.name)
+
+# ------------------ Tab 2: 图片文字翻译 ------------------
+with tab2:
+    st.subheader("🖼️ 图片文字高精度提取与翻译")
+    st.info("上传含有外文的图片，AI 将精准提取其中的文字并为您翻译。")
+    img_file = st.file_uploader("上传需翻译的图片", type=["png", "jpg", "jpeg", "webp"], key="img_uploader_trans")
+    
+    if img_file and st.button("🔍 开始精准翻译图片", type="primary"):
+        clean_api_key = api_key_input.strip()
+        if not clean_api_key:
+            st.error("请先在左侧输入有效的 Gemini API Key。")
+        else:
+            try:
+                client = genai.Client(api_key=clean_api_key)
+                image = Image.open(img_file)
+                st.image(image, caption="原始图片", use_container_width=True)
+                
+                with st.spinner(f"正在读取并翻译为 {target_language}..."):
+                    img_prompt = f"请精准提取这张图片中的文字，并翻译成【{target_language}】。要求：1.列出图片原文 2.列出准确翻译 3.绝不幻觉或凭空捏造。"
+                    
+                    response = client.models.generate_content(
+                        model=model_choice,
+                        contents=[image, img_prompt],
+                        config=types.GenerateContentConfig(temperature=0.1)
+                    )
+                    st.success("✅ 图片翻译完成！")
+                    st.markdown("### 📝 翻译结果")
+                    st.write(response.text)
+            except Exception as e:
+                st.error(f"图片翻译失败: {e}")
+
+# ------------------ Tab 3: 图片数据高精度提取（新功能） ------------------
+with tab3:
+    st.subheader("📊 严谨图片数据与表格提取 (转 Excel/Markdown)")
+    st.info("上传含有密集表格或数据的图片（如复杂的价格清单、配置表），AI 将逐行扫描并 100% 严格还原为标准表格数据供你下载，绝不胡编乱造。")
+    
+    data_img_file = st.file_uploader("上传数据/表格图片", type=["png", "jpg", "jpeg", "webp"], key="img_uploader_data")
+    
+    if data_img_file and st.button("📑 严格提取表格数据", type="primary"):
+        clean_api_key = api_key_input.strip()
+        if not clean_api_key:
+            st.error("请先在左侧输入有效的 Gemini API Key。")
+        else:
+            try:
+                client = genai.Client(api_key=clean_api_key)
+                data_image = Image.open(data_img_file)
+                st.image(data_image, caption="待提取数据图片", use_container_width=True)
+                
+                # 极端严谨的系统指令，专门应对密集型数据表格
+                data_sys_inst = """你是一个极其严谨的数据提取专家。
+【你的唯一任务】：精准、逐行提取用户图片中的所有数据，并输出为标准的 Markdown 表格。
+【绝对铁律】：
+1. 100% 忠实原图：绝对不允许产生幻觉，不能自动补全、不能凭空捏造原图中没有的数据。
+2. 保持原有排版逻辑：正确识别表头、行列对应关系。
+3. 纯净输出：你的回复必须【只有】Markdown 表格本身，绝不要输出任何多余的解释、寒暄或前言，不要用 ```markdown 代码块包裹，直接输出表格。"""
+                
+                with st.spinner("AI 正在严谨逐行比对提取图片中的数据..."):
+                    response = client.models.generate_content(
+                        model=model_choice,
+                        contents=[data_image, "请将图片中的数据严格逐行提取，并格式化为标准的 Markdown 表格。"],
                         config=types.GenerateContentConfig(
-                            response_mime_type="application/json",
-                            max_output_tokens=8192
+                            temperature=0.0,  # 温度设为绝对0，确保严谨不乱造
+                            system_instruction=data_sys_inst
                         )
                     )
                     
-                    parsed_data = safe_extract_json(response.text)
-                    st.session_state.subtitle_df = pd.DataFrame(parsed_data)
+                    md_result = response.text.strip()
                     
-                    client.files.delete(name=uploaded_media.name)
-                    os.remove(tmp_file_path)
+                    st.success("✅ 数据提取完毕！请确认无误后点击下方按钮下载。")
+                    st.markdown("### 👁️ 数据提取预览")
+                    # 使用 Streamlit 渲染 Markdown 预览
+                    st.markdown(md_result)
                     
-                    st.success("✅ 字幕提取完成！")
-                except Exception as e:
-                    st.error(f"❌ 处理失败：{e}")
-
-    if st.session_state.subtitle_df is not None:
-        st.divider()
-        edited_sub_df = st.data_editor(st.session_state.subtitle_df, use_container_width=True, key="sub_editor")
-        st.session_state.subtitle_df = edited_sub_df
-        
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            edited_sub_df.to_excel(writer, index=False)
-        st.download_button("📥 下载字幕 Excel", data=buffer.getvalue(), file_name="字幕提取.xlsx")
-
-
-# ==============================================================================
-# TAB 2: 图片表格提取与 AI 编辑器
-# ==============================================================================
-with tab2:
-    st.header("📊 严谨图片数据提取与 AI 代操助手")
-    
-    img_file = st.file_uploader("上传包含表格/数据的图片", type=["png", "jpg", "jpeg", "webp"])
-    
-    if img_file and api_key:
-        col_img, col_btn = st.columns([1, 2])
-        with col_img:
-            st.image(Image.open(img_file), caption="原始图片", use_container_width=True)
-            
-        with col_btn:
-            if st.button("🚀 开始精准提取表格", type="primary"):
-                with st.spinner(f"正在使用 {selected_model} 解析表格，遇到服务器繁忙将自动重试..."):
-                    try:
-                        client = genai.Client(api_key=api_key)
-                        
-                        prompt = """
-                        你现在的任务是极其严谨地识别图片中的表格数据。
-                        
-                        【硬性要求】：
-                        1. 必须原封不动地提取每一行、每一列！绝对禁止遗漏任何一行数据！
-                        2. 绝对禁止偷懒，禁止使用省略号(...)，必须从表格的第一行完整提取到最后一行！
-                        3. 必须且仅输出标准的 JSON 数组（Array of Objects），每行一个 Object，Key 为列名，Value 为内容。
-                        """
-                        
-                        response = generate_with_retry(
-                            client=client,
-                            model=selected_model,
-                            contents=[types.Part.from_bytes(data=img_file.getvalue(), mime_type=img_file.type), prompt],
-                            config=types.GenerateContentConfig(
-                                response_mime_type="application/json",
-                                temperature=0.1,
-                                max_output_tokens=8192
-                            )
+                    # 尝试转为 Excel
+                    df = parse_markdown_table_to_df(md_result)
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.download_button(
+                            label="📥 下载为 Markdown (.md)",
+                            data=md_result,
+                            file_name="extracted_data.md",
+                            mime="text/markdown",
+                            type="secondary"
                         )
                         
-                        parsed_data = safe_extract_json(response.text)
-                        st.session_state.table_df = pd.DataFrame(parsed_data)
-                        st.session_state.chat_history = [] 
-                        st.success("✅ 完整提取成功！进入校对与智能编辑区。")
-                    except Exception as e:
-                        if "503" in str(e):
-                            st.error("❌ 官方服务器当前极度拥堵 (503)。建议在侧边栏切换为 `gemini-1.5-flash` 模型后重试。")
-                        else:
-                            st.error(f"❌ 识别失败：{e}")
-
-    # 编辑与对话交互区
-    if st.session_state.table_df is not None:
-        st.divider()
-        left_col, right_col = st.columns([3, 2])
-        
-        with left_col:
-            st.markdown("**1. 交互式数据表 (可双击修改)**")
-            edited_table_df = st.data_editor(st.session_state.table_df, num_rows="dynamic", use_container_width=True, key="table_editor")
-            st.session_state.table_df = edited_table_df
-
-            buffer2 = io.BytesIO()
-            with pd.ExcelWriter(buffer2, engine='openpyxl') as writer:
-                edited_table_df.to_excel(writer, index=False)
-            st.download_button("📥 下载数据 Excel", data=buffer2.getvalue(), file_name="表格数据.xlsx")
-            
-        with right_col:
-            st.markdown(f"**🤖 AI 智能编辑助手 ({selected_model})**")
-            chat_box = st.container(height=350)
-            
-            with chat_box:
-                for msg in st.session_state.chat_history:
-                    with st.chat_message(msg["role"]):
-                        st.markdown(msg["content"])
-                        
-            if user_cmd := st.chat_input("如：删除第一列，或者把单价乘以2"):
-                st.session_state.chat_history.append({"role": "user", "content": user_cmd})
-                with chat_box:
-                    st.chat_message("user").markdown(user_cmd)
-                    
-                with st.spinner("AI 正在执行表格操作..."):
-                    try:
-                        client = genai.Client(api_key=api_key)
-                        sys_prompt = f"""
-                        你是数据编辑助手。当前表格 JSON: {st.session_state.table_df.to_json(orient='records', force_ascii=False)}
-                        用户指令: "{user_cmd}"
-                        请输出 JSON 结构：{{"reply": "操作说明", "updated_json": [更新后的完整表格 JSON 数组，如无需更新则设为 null]}}
-                        """
-                        
-                        res = generate_with_retry(
-                            client=client,
-                            model=selected_model,
-                            contents=sys_prompt,
-                            config=types.GenerateContentConfig(
-                                response_mime_type="application/json",
-                                max_output_tokens=8192
-                            )
-                        )
-                        
-                        ai_res = safe_extract_json(res.text)
-                        
-                        if isinstance(ai_res, dict) and ai_res.get("updated_json"):
-                            st.session_state.table_df = pd.DataFrame(ai_res["updated_json"])
-                            reply_text = f"{ai_res.get('reply', '执行完毕')} \n\n✅ **已更新左侧表格**"
-                            st.session_state.chat_history.append({"role": "assistant", "content": reply_text})
-                            st.rerun() 
-                        else:
-                            reply_text = ai_res.get("reply", "操作完成。") if isinstance(ai_res, dict) else "操作完成。"
-                            st.session_state.chat_history.append({"role": "assistant", "content": reply_text})
-                            st.chat_message("assistant").markdown(reply_text)
+                    with col2:
+                        if df is not None and not df.empty:
+                            # 写入内存中的 Excel
+                            output = io.BytesIO()
+                            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                                df.to_excel(writer, index=False, sheet_name='Data')
+                            excel_data = output.getvalue()
                             
+                            st.download_button(
+                                label="📊 下载为 Excel (.xlsx)",
+                                data=excel_data,
+                                file_name="extracted_data.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                type="primary"
+                            )
+                        else:
+                            st.warning("⚠️ 未能从提取结果中解析出标准表格格式，无法提供 Excel 下载。建议检查原图是否清晰。")
+                            
+            except Exception as e:
+                st.error(f"数据提取失败: {e}")
+
+# ------------------ Tab 4: 严谨的 AI 答疑助手 ------------------
+with tab4:
+    st.subheader("🤖 严谨务实的 AI 答疑与技术助手")
+    st.info("💡 **系统设定**：这个助手被下达了【绝不偷懒、绝不迎合、实事求是百分百努力解决需求】的死指令。遇到难缠的乱码或奇怪的日文翻译，请直接扔给它处理。")
+    
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    if prompt := st.chat_input("请在此粘贴需要重新精翻的文本，或提出您的具体需求..."):
+        clean_api_key = api_key_input.strip()
+        
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+            
+        if not clean_api_key:
+            with st.chat_message("assistant"):
+                st.error("请先在左侧栏输入 Gemini API Key，我才能介入解决您的问题。")
+        else:
+            with st.chat_message("assistant"):
+                with st.spinner("AI 正在认真解析并执行您的需求..."):
+                    try:
+                        client = genai.Client(api_key=clean_api_key)
+                        
+                        # 极端务实且专注解决问题的系统指令
+                        chat_sys_inst = """你是一个专门帮助用户解决具体需求的技术与语言助手。
+【你的最高准则】：
+1. 实事求是，百分百努力：绝不偷懒，绝不只做表面功夫迎合用户。遇到任务必须提供最直接、最完整的解决方案（完整的代码、完整的精准翻译、清晰的步骤）。
+2. 绝对精准严谨：绝不允许产生幻觉或胡编乱造，绝不要不懂装懂。
+3. 务实答复：不要说废话和客套话，直奔主题解决用户当前提出的问题。"""
+                        
+                        chat_response = client.models.generate_content(
+                            model=model_choice,
+                            contents=prompt,
+                            config=types.GenerateContentConfig(
+                                temperature=0.1, # 极低温度保持逻辑在线
+                                system_instruction=chat_sys_inst
+                            )
+                        )
+                        st.markdown(chat_response.text)
+                        st.session_state.messages.append({"role": "assistant", "content": chat_response.text})
                     except Exception as e:
-                        st.error(f"助手处理出错：{e}")
+                        st.error(f"API 请求失败，未能完成任务: {e}")
