@@ -1,6 +1,5 @@
 streamlit
-faster-whisper
-google-genai
-pillow
 pandas
 openpyxl
+pillow
+google-genai
