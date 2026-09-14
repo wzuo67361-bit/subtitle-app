@@ -34,7 +34,6 @@ with st.sidebar:
         "gemini-2.0-flash",
         "gemini-2.0-pro"
     ]
-    # 默认选中 gemini-2.0-flash (索引为7)
     selected_model = st.selectbox("🤖 选择 AI 模型", model_options, index=7)
     
     if not api_key:
@@ -43,10 +42,8 @@ with st.sidebar:
     st.markdown(f"**系统状态：**\n- 运行环境：轻量化云端架构\n- 当前模型：`{selected_model}`")
 
 # ----------------- 初始化全局状态 (严格隔离) -----------------
-# Tab 1 状态
 if "subtitle_df" not in st.session_state:
     st.session_state.subtitle_df = None
-# Tab 2 状态
 if "table_df" not in st.session_state:
     st.session_state.table_df = None
 if "chat_history" not in st.session_state:
@@ -54,7 +51,6 @@ if "chat_history" not in st.session_state:
 
 # ----------------- 通用工具函数 -----------------
 def clean_json_output(raw_text):
-    """清洗大模型返回的文本，确保只留下合法 JSON"""
     text = raw_text.strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1]
@@ -72,63 +68,57 @@ tab1, tab2 = st.tabs(["🎵 视听字幕与翻译 (云端版)", "📊 图片表�
 # ==============================================================================
 with tab1:
     st.header("🎵 音视频智能字幕提取与双语翻译")
-    st.info("💡 音视频文件将直接送往云端处理，不占用本地内存，彻底告别崩溃。")
-    
     media_file = st.file_uploader("上传音/视频文件", type=["mp3", "wav", "m4a", "mp4"])
     
     if media_file and api_key:
         if st.button("🚀 开始提取与翻译字幕", type="primary"):
-            with st.spinner(f"🚀 正在使用 {selected_model} 处理媒体文件，请稍候..."):
+            with st.spinner(f"🚀 正在处理，请稍候..."):
                 try:
                     client = genai.Client(api_key=api_key)
-                    # 临时保存文件
                     with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(media_file.name)[1]) as tmp_file:
                         tmp_file.write(media_file.read())
                         tmp_file_path = tmp_file.name
 
-                    # 上传至 Google
                     uploaded_media = client.files.upload(file=tmp_file_path)
                     
                     prompt = """
-                    请仔细聆听此媒体文件，提取其中的所有语音，并翻译为中文（如果原音是中文则提供对应翻译或润色）。
-                    必须以合法的 JSON 数组格式返回，每个元素是一个对象，包含三个字段："时间", "原文", "译文"。
-                    例如：[{"时间": "00:00-00:05", "原文": "Hello", "译文": "你好"}]
+                    请仔细聆听此媒体文件，提取其中的所有语音，并翻译为中文。
+                    必须以合法的 JSON 数组格式返回：[{"时间": "00:00-00:05", "原文": "Hello", "译文": "你好"}]。
                     绝不能包含任何 Markdown 符号或额外说明文字，只能输出纯 JSON 数组。
                     """
                     
-                    # 动态使用侧边栏选择的模型
                     response = client.models.generate_content(
                         model=selected_model,
                         contents=[uploaded_media, prompt],
-                        config=types.GenerateContentConfig(response_mime_type="application/json")
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            max_output_tokens=8192 # 同样放开字幕的长度限制
+                        )
                     )
                     
                     json_str = clean_json_output(response.text)
                     st.session_state.subtitle_df = pd.DataFrame(json.loads(json_str))
                     
-                    # 清理文件
                     client.files.delete(name=uploaded_media.name)
                     os.remove(tmp_file_path)
                     
                     st.success("✅ 字幕提取完成！")
                 except Exception as e:
-                    st.error(f"❌ 处理失败。可能是该模型版本不支持当前请求或网络异常。错误详情：{e}")
+                    st.error(f"❌ 处理失败：{e}")
 
-    # 字幕预览与导出
     if st.session_state.subtitle_df is not None:
         st.divider()
-        st.markdown("### 字幕校对与导出")
         edited_sub_df = st.data_editor(st.session_state.subtitle_df, use_container_width=True, key="sub_editor")
         st.session_state.subtitle_df = edited_sub_df
         
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
             edited_sub_df.to_excel(writer, index=False)
-        st.download_button("📥 下载字幕 Excel", data=buffer.getvalue(), file_name="字幕提取结果.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下载字幕 Excel", data=buffer.getvalue(), file_name="字幕提取.xlsx")
 
 
 # ==============================================================================
-# TAB 2: 图片表格提取与 AI 编辑器
+# TAB 2: 图片表格提取与 AI 编辑器 (加入防偷懒机制)
 # ==============================================================================
 with tab2:
     st.header("📊 严谨图片数据提取与 AI 代操助手")
@@ -142,31 +132,43 @@ with tab2:
             
         with col_btn:
             if st.button("🚀 开始精准提取表格", type="primary"):
-                with st.spinner(f"正在使用 {selected_model} 拆解表格结构..."):
+                with st.spinner(f"正在使用 {selected_model} 逐行拆解表格，确保不遗漏..."):
                     try:
                         client = genai.Client(api_key=api_key)
-                        prompt = "严谨识别图片中的表格。必须且仅输出标准的 JSON 数组（Array of Objects），每行一个 Object，Key 为列名，Value 为内容。不要 Markdown 标记。"
                         
-                        # 动态使用侧边栏选择的模型
+                        # 【核心修正】：极其严厉的防偷懒提示词
+                        prompt = """
+                        你现在的任务是极其严谨地识别图片中的表格数据。
+                        
+                        【极度重要的硬性要求】：
+                        1. 必须原封不动地提取每一行、每一列！绝对禁止遗漏任何一行数据！
+                        2. 绝对禁止“偷懒”！禁止使用省略号(...)，禁止自作主张截断内容，必须从表格的第一行完整提取到最后一行！
+                        3. 必须且仅输出标准的 JSON 数组（Array of Objects），每行一个 Object，Key 为列名，Value 为内容。
+                        4. 不要 Markdown 标记，不要多余的废话。
+                        """
+                        
                         response = client.models.generate_content(
                             model=selected_model,
                             contents=[types.Part.from_bytes(data=img_file.getvalue(), mime_type=img_file.type), prompt],
-                            config=types.GenerateContentConfig(response_mime_type="application/json")
+                            config=types.GenerateContentConfig(
+                                response_mime_type="application/json",
+                                temperature=0.1,         # 【核心修正】：降低温度，减少模型发散，提升精准度
+                                max_output_tokens=8192   # 【核心修正】：最大化输出额度，防止长表格被强行截断
+                            )
                         )
                         
                         json_str = clean_json_output(response.text)
                         st.session_state.table_df = pd.DataFrame(json.loads(json_str))
                         st.session_state.chat_history = [] 
-                        st.success("✅ 提取成功！进入校对与智能编辑区。")
+                        st.success("✅ 完整提取成功！进入校对与智能编辑区。")
                     except Exception as e:
-                        st.error(f"❌ 识别失败。错误详情：{e}")
+                        st.error(f"❌ 识别失败。可能图片过长或格式有误，错误详情：{e}")
 
     # 编辑与对话交互区
     if st.session_state.table_df is not None:
         st.divider()
         left_col, right_col = st.columns([3, 2])
         
-        # 左侧：动态表格与下载
         with left_col:
             st.markdown("**1. 交互式数据表 (可双击修改)**")
             edited_table_df = st.data_editor(st.session_state.table_df, num_rows="dynamic", use_container_width=True, key="table_editor")
@@ -175,20 +177,17 @@ with tab2:
             buffer2 = io.BytesIO()
             with pd.ExcelWriter(buffer2, engine='openpyxl') as writer:
                 edited_table_df.to_excel(writer, index=False)
-            st.download_button("📥 下载数据 Excel", data=buffer2.getvalue(), file_name="表格数据.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.download_button("📥 下载数据 Excel", data=buffer2.getvalue(), file_name="表格数据.xlsx")
             
-        # 右侧：AI 表格编辑助手
         with right_col:
             st.markdown(f"**🤖 AI 智能编辑助手 ({selected_model})**")
             chat_box = st.container(height=350)
             
-            # 渲染历史
             with chat_box:
                 for msg in st.session_state.chat_history:
                     with st.chat_message(msg["role"]):
                         st.markdown(msg["content"])
                         
-            # 输入与处理逻辑
             if user_cmd := st.chat_input("如：删除第一列，或者把单价乘以2"):
                 st.session_state.chat_history.append({"role": "user", "content": user_cmd})
                 with chat_box:
@@ -203,11 +202,13 @@ with tab2:
                         请输出 JSON 结构：{{"reply": "操作说明", "updated_json": [更新后的完整表格 JSON 数组，如无需更新则设为 null]}}
                         """
                         
-                        # 助手也使用用户当前选择的模型
                         res = client.models.generate_content(
                             model=selected_model,
                             contents=sys_prompt,
-                            config=types.GenerateContentConfig(response_mime_type="application/json")
+                            config=types.GenerateContentConfig(
+                                response_mime_type="application/json",
+                                max_output_tokens=8192
+                            )
                         )
                         
                         ai_res = json.loads(clean_json_output(res.text))
