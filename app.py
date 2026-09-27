@@ -39,224 +39,130 @@ model_options = [
     "gemini-3.5-flash-lite",
     "gemini-3.5-transcribe",
     "gemini-2.5-flash",
-    "gemini-2.0-flash",
+    "gemini-2.0-flash"
 ]
-model_choice = st.sidebar.selectbox("2. 选择全局 Gemini 模型", model_options, index=3)
-
+model_choice = st.sidebar.selectbox("2. 选择全局 Gemini 模型", model_options, index=0)
 target_language = st.sidebar.selectbox("3. 全局目标语言", ["简体中文", "繁体中文", "English"], index=0)
 whisper_size = st.sidebar.selectbox("4. Whisper 音频识别精度", ["tiny", "base", "small", "medium"], index=1)
-hf_token = st.sidebar.text_input("5. HuggingFace Token (分离男女声可选)", type="password")
+hf_token = st.sidebar.text_input("5. HuggingFace Token (可选)", type="password")
 
-# ================= 辅助函数与模型加载 =================
+# ================= 辅助函数 =================
 @st.cache_resource
 def load_whisper_model(size):
     return WhisperModel(size, device="cpu", compute_type="int8")
 
-def generate_with_retry(client, model, contents, config, max_retries=3):
-    """带指数退避重试的 API 调用函数，解决 503 与 429 问题"""
-    for attempt in range(max_retries):
-        try:
-            return client.models.generate_content(
-                model=model,
-                contents=contents,
-                config=config
-            )
-        except Exception as e:
-            err_str = str(e)
-            if ("503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str) and attempt < max_retries - 1:
-                wait_time = (attempt + 1) * 2
-                st.toast(f"⏳ 服务器繁忙 (503/429)，正在第 {attempt + 1} 次重试 (等待 {wait_time} 秒)...", icon="⚠️")
-                time.sleep(wait_time)
-            else:
-                raise e
+def generate_with_fallback(client, primary_model, contents, config, max_retries=3):
+    """带自动降级的稳定生成器"""
+    fallback_queue = [primary_model, "gemini-3.5-flash", "gemini-2.5-flash"]
+    seen = set()
+    ordered_models = [m for m in fallback_queue if m not in seen and not seen.add(m)]
+
+    last_exception = None
+    for m_name in ordered_models:
+        for attempt in range(max_retries):
+            try:
+                return client.models.generate_content(model=m_name, contents=contents, config=config)
+            except Exception as e:
+                err_str = str(e)
+                last_exception = e
+                if any(err in err_str for err in ["503", "UNAVAILABLE", "429", "ResourceExhausted"]):
+                    time.sleep((attempt + 1) * 2)
+                else:
+                    break
+        if "503" in str(last_exception) or "429" in str(last_exception):
+            st.toast(f"🔄 模型 `{m_name}` 繁忙，自动降级切换...", icon="🔄")
+        else:
+            raise last_exception
+    raise last_exception
 
 def clean_markdown_text(raw_text):
-    """安全剥离 Markdown 标记与代码块，防止解析报错"""
-    if not raw_text or not raw_text.strip():
-        return ""
+    if not raw_text or not raw_text.strip(): return ""
     text = raw_text.strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1]
-        if text.endswith("```"):
-            text = text.rsplit("\n", 1)[0]
-        if text.startswith("markdown"):
-            text = text[8:].strip()
-        elif text.startswith("srt"):
-            text = text[3:].strip()
-    return text.strip()
+        if text.endswith("```"): text = text.rsplit("\n", 1)[0]
+        text = text.replace("markdown", "").replace("srt", "").strip()
+    return text
 
-def parse_markdown_table_to_df(md_text):
-    """将 AI 生成的 Markdown 表格安全解析为 Pandas DataFrame"""
-    cleaned_md = clean_markdown_text(md_text)
-    lines = cleaned_md.split('\n')
-    table_lines = [line.strip() for line in lines if line.strip().startswith('|')]
-    
-    if not table_lines:
-        return None
-        
-    data_lines = [line for line in table_lines if not set(line.replace('|', '').strip()) <= set('-: ')]
-    
-    if not data_lines:
-        return None
-        
-    parsed_data = []
-    for line in data_lines:
-        row = [cell.strip() for cell in line.strip('|').split('|')]
-        parsed_data.append(row)
-        
-    if len(parsed_data) > 1:
-        return pd.DataFrame(parsed_data[1:], columns=parsed_data[0])
-    elif len(parsed_data) == 1:
-        return pd.DataFrame(columns=parsed_data[0])
-    return None
-
-# ================= 核心功能选项卡（Tabs） =================
-tab1, tab2, tab3, tab4 = st.tabs(["🎙️ 音视频双语字幕", "🖼️ 图片文字翻译", "📊 严谨图片数据提取", "🤖 严谨的 AI 答疑助手"])
+# ================= 核心功能选项卡 =================
+tab1, tab2, tab3, tab4 = st.tabs(["🎙️ 音视频双语字幕", "🖼️ 图片文字翻译", "📊 严谨图片数据提取", "🤖 严谨答疑助手"])
 
 # ------------------ Tab 1: 音视频双语字幕 ------------------
 with tab1:
     st.subheader("处理音视频并生成双语对照字幕")
-    uploaded_file = st.file_uploader("上传音视频文件", type=["mp4", "mkv", "mov", "avi", "mp3", "wav", "m4a"], key="media_uploader")
-    
-    if uploaded_file is not None:
-        tfile = tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1])
-        tfile.write(uploaded_file.read())
-        tfile.close()
-        st.audio(tfile.name)
-        
-        if st.button("🚀 开始提取与双语翻译", type="primary", key="btn_media"):
-            clean_api_key = api_key_input.strip()
-            if not clean_api_key:
-                st.error("请先在左侧输入有效的 Gemini API Key。")
-            else:
-                try:
-                    speakers_map = {}
-                    speaker_segments = []
-                    
-                    with st.spinner("正在分析音频说话人特征..."):
-                        if DIARIZATION_AVAILABLE:
-                            try:
-                                pipeline_token = hf_token.strip() if hf_token else None
-                                diarization_pipeline = Pipeline.from_pretrained(
-                                    "pyannote/speaker-diarization-3.1",
-                                    use_auth_token=pipeline_token if pipeline_token else True
-                                )
-                                diarization = diarization_pipeline(tfile.name)
-                                for turn, _, speaker in diarization.itertracks(yield_label=True):
-                                    speaker_segments.append((turn.start, turn.end, speaker))
-                            except Exception as diar_err:
-                                st.warning(f"高级分离降级（仍可正常转写）：{diar_err}")
-                        
-                    with st.spinner("正在高精度提取音频原文..."):
-                        model = load_whisper_model(whisper_size)
-                        segments, info = model.transcribe(
-                            tfile.name, beam_size=5, vad_filter=True,
-                            vad_parameters=dict(min_silence_duration_ms=500),
-                            condition_on_previous_text=False
-                        )
-                        
-                        srt_blocks = []
-                        for i, segment in enumerate(list(segments), start=1):
-                            seg_start, seg_end = segment.start, segment.end
-                            text = segment.text.strip()
-                            speaker_label = "[未知]"
-                            
-                            if speaker_segments:
-                                for (d_start, d_end, spk) in speaker_segments:
-                                    if max(seg_start, d_start) < min(seg_end, d_end):
-                                        if spk not in speakers_map:
-                                            speakers_map[spk] = "男" if len(speakers_map) == 0 else "女"
-                                        speaker_label = f"[{speakers_map[spk]}]"
-                                        break
-                            else:
-                                speaker_label = "[男]" if i % 2 != 0 else "[女]"
+    uploaded_file = st.file_uploader("上传音视频文件", type=["mp4", "mkv", "mov", "avi", "mp3", "wav", "m4a"])
+    if uploaded_file and st.button("🚀 开始提取与翻译", type="primary"):
+        clean_api_key = api_key_input.strip()
+        if not clean_api_key:
+            st.error("请输入 API Key。")
+        else:
+            try:
+                tfile = tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1])
+                tfile.write(uploaded_file.read())
+                tfile.close()
+                st.audio(tfile.name)
+                
+                with st.spinner("正在高精度提取音频原文..."):
+                    model = load_whisper_model(whisper_size)
+                    segments, _ = model.transcribe(tfile.name, beam_size=5, vad_filter=True)
+                    srt_blocks = []
+                    for i, segment in enumerate(list(segments), start=1):
+                        def fmt(secs):
+                            h, m, s, ms = int(secs//3600), int((secs%3600)//60), int(secs%60), int((secs%1)*1000)
+                            return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+                        srt_blocks.append(f"{i}\n{fmt(segment.start)} --> {fmt(segment.end)}\n{segment.text.strip()}")
+                
+                if not srt_blocks:
+                    st.warning("未检测到有效人声。")
+                    st.stop()
 
-                            def format_time(seconds):
-                                h = int(seconds // 3600)
-                                m = int((seconds % 3600) // 60)
-                                s = int(seconds % 60)
-                                ms = int((seconds - int(seconds)) * 1000)
-                                return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
-                            
-                            srt_blocks.append(f"{i}\n{format_time(seg_start)} --> {format_time(seg_end)}\n{speaker_label} {text}")
-                    
-                    if not srt_blocks:
-                        st.warning("未检测到有效人声。")
-                        st.stop()
-
+                sys_inst = f"""你是一个顶级的双语字幕翻译与校对专家。
+【铁律】：
+1. 原文可能由语音识别产生误听乱码，必须优先推断实际含义再精准翻译，绝禁按字面死翻！
+2. 遇到完全无逻辑的乱码，标注'[听误]'。
+3. 输出纯 SRT 格式：序号、时间轴、原文、{target_language}翻译。绝无废话。"""
+                
+                with st.spinner(f"正在使用 {model_choice} 生成双语字幕..."):
                     client = genai.Client(api_key=clean_api_key)
-                    full_text = "\n".join(srt_blocks)
-                    sys_inst = f"""你是一个顶级的双语字幕翻译与校对专家。
-【任务】：将给定的 SRT 字幕翻译为【音频原文】与【{target_language}翻译】的双语格式。
-【核心防幻觉与防硬翻铁律】：
-1. 原文可能由 ASR（语音识别）产生误听乱码（如听错的片假名词汇、同音错字），必须优先结合上下文逻辑推断实际含义后再进行精准翻译，绝对禁止按字面乱码僵硬死翻！
-2. 遇到完全无逻辑的口语断句或误听，请结合前后连贯语境进行合理推断润色。若彻底无法理清逻辑，请标注'[听误]'。
-3. 严格保留 SRT 时间轴与序号标准格式，输出共四行：序号、时间轴、原文、翻译。纯净输出，禁止任何 Markdown 说明。"""
-                    
-                    with st.spinner(f"正在使用 {model_choice} 生成双语字幕 (含防硬翻校对)..."):
-                        response = generate_with_retry(
-                            client=client,
-                            model=model_choice,
-                            contents=f"请翻译以下字幕：\n\n{full_text}",
-                            config=types.GenerateContentConfig(
-                                temperature=0.0, 
-                                system_instruction=sys_inst,
-                                max_output_tokens=8192
-                            )
-                        )
-                    
+                    response = generate_with_fallback(
+                        client, model_choice, f"翻译字幕：\n\n{chr(10).join(srt_blocks)}", 
+                        types.GenerateContentConfig(temperature=0.0, system_instruction=sys_inst, max_output_tokens=8192)
+                    )
                     complete_result = clean_markdown_text(response.text)
-                    st.success("🎉 双语字幕处理完成！")
-                    st.text_area("精校版字幕", complete_result, height=300)
-                    st.download_button("📥 下载字幕", complete_result, file_name="bilingual.srt", type="primary")
-                except Exception as e:
-                    st.error(f"发生错误: {e}")
-                finally:
-                    if os.path.exists(tfile.name):
-                        os.remove(tfile.name)
+                    st.success("🎉 处理完成！")
+                    st.text_area("精校字幕", complete_result, height=300)
+                    st.download_button("📥 下载字幕 .srt", complete_result, "bilingual.srt", "primary")
+            except Exception as e:
+                st.error(f"错误: {e}")
 
 # ------------------ Tab 2: 图片文字翻译 ------------------
 with tab2:
-    st.subheader("🖼️ 图片文字高精度提取与翻译")
-    st.info("上传含有外文的图片，AI 将精准提取其中的文字并为您翻译。")
-    img_file = st.file_uploader("上传需翻译的图片", type=["png", "jpg", "jpeg", "webp"], key="img_uploader_trans")
-    
-    if img_file and st.button("🔍 开始精准翻译图片", type="primary"):
-        clean_api_key = api_key_input.strip()
-        if not clean_api_key:
-            st.error("请先在左侧输入有效的 Gemini API Key。")
+    st.subheader("🖼️ 图片文字翻译")
+    img_file = st.file_uploader("上传图片", type=["png", "jpg", "jpeg", "webp"], key="img_trans")
+    if img_file and st.button("🔍 翻译图片", type="primary"):
+        if not api_key_input.strip(): st.error("请输入 API Key。")
         else:
             try:
-                client = genai.Client(api_key=clean_api_key)
+                client = genai.Client(api_key=api_key_input.strip())
                 image = Image.open(img_file)
-                st.image(image, caption="原始图片", use_container_width=True)
-                
-                with st.spinner(f"正在读取并翻译为 {target_language}..."):
-                    img_prompt = f"请精准提取这张图片中的文字，并翻译成【{target_language}】。要求：1.列出图片原文 2.列出准确翻译 3.绝不幻觉或凭空捏造。"
-                    
-                    response = generate_with_retry(
-                        client=client,
-                        model=model_choice,
-                        contents=[image, img_prompt],
-                        config=types.GenerateContentConfig(
-                            temperature=0.1,
-                            max_output_tokens=8192
-                        )
+                st.image(image, use_container_width=True)
+                with st.spinner("读取并翻译中..."):
+                    res = generate_with_fallback(
+                        client, model_choice, [image, f"提取图片文字并精准翻译为{target_language}，不幻觉捏造。"],
+                        types.GenerateContentConfig(temperature=0.1, max_output_tokens=8192)
                     )
-                    st.success("✅ 图片翻译完成！")
-                    st.markdown("### 📝 翻译结果")
-                    st.write(response.text)
-            except Exception as e:
-                st.error(f"图片翻译失败: {e}")
+                    st.write(res.text)
+            except Exception as e: st.error(f"失败: {e}")
 
-# ------------------ Tab 3: 图片数据高精度提取 ------------------
+# ------------------ Tab 3: 图片数据高精度提取（全新升级版） ------------------
 with tab3:
-    st.subheader("📊 严谨图片数据与表格提取 (转 Excel/Markdown)")
-    st.info("上传含有密集表格或数据的图片（如复杂的价格清单、配置表），AI 将逐行扫描并 100% 严格还原为标准表格数据供你下载，绝不胡编乱造。")
+    st.subheader("📊 严谨图片数据与表格提取 (所见即所得导出)")
+    st.info("上传原图后，AI 将进行 1:1 像素级严谨复刻。拒绝幻觉、拒绝排版错乱。提供交互式预览，确认无误后一键导出纯净 Excel。")
     
-    data_img_file = st.file_uploader("上传数据/表格图片", type=["png", "jpg", "jpeg", "webp"], key="img_uploader_data")
+    data_img_file = st.file_uploader("上传需严谨提取的表格/数据图片", type=["png", "jpg", "jpeg", "webp"], key="img_data")
+    user_hint = st.text_input("附加指令（选填，如不填 AI 将自动务实分析并排版）：", placeholder="例如：重点提取型号和价格，或者不填交给我")
     
-    if data_img_file and st.button("📑 严格提取表格数据", type="primary"):
+    if data_img_file and st.button("📑 开始 100% 严谨提取", type="primary"):
         clean_api_key = api_key_input.strip()
         if not clean_api_key:
             st.error("请先在左侧输入有效的 Gemini API Key。")
@@ -264,113 +170,95 @@ with tab3:
             try:
                 client = genai.Client(api_key=clean_api_key)
                 data_image = Image.open(data_img_file)
-                st.image(data_image, caption="待提取数据图片", use_container_width=True)
                 
-                data_sys_inst = """你是一个极其严谨的数据提取专家。
-【你的唯一任务】：精准、逐行提取用户图片中的所有数据，并输出为标准的 Markdown 表格。
-【绝对铁律】：
-1. 100% 忠实原图：绝对不允许产生幻觉，不能自动补全、不能凭空捏造原图中没有的数据。
-2. 绝对禁止偷懒与截断：必须从表格的第一行原封不动提取到最后一行，严禁使用省略号(...)！
-3. 保持原有排版逻辑：正确识别表头、行列对应关系。
-4. 纯净输出：你的回复必须【只有】Markdown 表格本身，绝不要输出任何多余的解释、寒暄或前言，不要用 ```markdown 代码块包裹，直接输出表格。"""
+                col1, col2 = st.columns([1, 2])
+                with col1:
+                    st.image(data_image, caption="待提取原图", use_container_width=True)
                 
-                with st.spinner("AI 正在严谨逐行比对提取图片中的数据 (遇到过载将自动重试)..."):
-                    response = generate_with_retry(
+                data_sys_inst = """你是一个极其严谨的视觉数据架构师与底层数据清洗专家。
+【核心绝对铁律——必须遵守，否则任务失败】：
+1. 绝对忠实原图（0幻觉）：每一个中英文、数字、符号必须与原图分毫不差。原图有什么就输出什么，没有的绝对禁止凭空瞎编、造假数据。
+2. 严格还原排版与位置：上传的原图是什么排版就是什么排版，哪个字、数字在哪个行列位置，提取后必须严格对应。遇到空缺保留空缺，不可错位。
+3. 务实、落地、不偷懒的补全精神：如果用户的附加指令很少，你不准应付！你必须发挥真正的商业落地精神，自动分析这是什么文档（如：二手手机批发报价单、财务报表、进销存单据），并主动构建最符合该业务逻辑的严谨表格结构，把图里每一个角落的有用信息都提取进去。
+4. 绝对禁止截断：无论数据多长，必须从头提取到尾，禁止使用“...”省略。
+
+【输出格式——工业级 CSV 强制要求】：
+不要输出 Markdown 表格，你必须输出标准的 CSV 格式，并严格用 ```csv 和 ``` 包裹代码块。
+- 采用英文逗号(,)分隔列，换行分隔行。
+- 如果提取的内容中包含逗号、换行符或特殊符号，必须用英文双引号("")将该单元格内容包裹。
+- 确保行列完全对齐。"""
+
+                prompt_content = "请严谨提取图片数据。"
+                if user_hint.strip():
+                    prompt_content += f" 用户的附加要求是：{user_hint}"
+
+                with st.spinner("AI 正在像素级严谨提取数据，并构建底层结构 (请耐心等待)..."):
+                    response = generate_with_fallback(
                         client=client,
-                        model=model_choice,
-                        contents=[data_image, "请将图片中的数据严格逐行提取，并格式化为标准的 Markdown 表格。"],
+                        primary_model=model_choice,
+                        contents=[data_image, prompt_content],
                         config=types.GenerateContentConfig(
-                            temperature=0.0,
+                            temperature=0.0, # 严禁发散，保证 0 幻觉
                             system_instruction=data_sys_inst,
                             max_output_tokens=8192
                         )
                     )
                     
-                    md_result = clean_markdown_text(response.text)
+                    # 使用正则精准提取 CSV 代码块
+                    csv_match = re.search(r'```csv\n(.*?)\n```', response.text, re.DOTALL)
                     
-                    st.success("✅ 数据提取完毕！请确认无误后点击下方按钮下载。")
-                    st.markdown("### 👁️ 数据提取预览")
-                    st.markdown(md_result)
-                    
-                    df = parse_markdown_table_to_df(md_result)
-                    
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        st.download_button(
-                            label="📥 下载为 Markdown (.md)",
-                            data=md_result,
-                            file_name="extracted_data.md",
-                            mime="text/markdown",
-                            type="secondary"
-                        )
+                    if csv_match:
+                        csv_data = csv_match.group(1).strip()
+                        # 解析为 Pandas DataFrame
+                        df = pd.read_csv(io.StringIO(csv_data))
                         
-                    with col2:
-                        if df is not None and not df.empty:
+                        with col2:
+                            st.success("✅ 提取完毕！请在下方清晰预览提取结果，确认与原图排版、数据一致。")
+                            # 交互式数据表预览，所见即所得
+                            st.dataframe(df, use_container_width=True, height=400)
+                            
+                            # Excel 导出
                             output = io.BytesIO()
                             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                                df.to_excel(writer, index=False, sheet_name='Data')
+                                df.to_excel(writer, index=False, sheet_name='Extracted Data')
                             excel_data = output.getvalue()
                             
                             st.download_button(
-                                label="📊 下载为 Excel (.xlsx)",
+                                label="📥 确认无误，一键下载标准 Excel (.xlsx) 文件",
                                 data=excel_data,
-                                file_name="extracted_data.xlsx",
+                                file_name="strict_extracted_data.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                type="primary"
+                                type="primary",
+                                use_container_width=True
                             )
-                        else:
-                            st.warning("⚠️ 未能从提取结果中解析出标准表格格式，无法提供 Excel 下载。建议检查原图是否清晰。")
+                    else:
+                        st.warning("未能从 AI 的回复中找到标准的 CSV 代码块。以下为原始输出：")
+                        st.write(response.text)
                             
             except Exception as e:
-                st.error(f"数据提取失败: {e}")
+                st.error(f"数据提取失败或排版过于复杂导致解析错误: {e}")
 
 # ------------------ Tab 4: 严谨的 AI 答疑助手 ------------------
 with tab4:
     st.subheader("🤖 严谨务实的 AI 答疑与技术助手")
-    st.info("💡 **系统设定**：这个助手被下达了【绝不偷懒、绝不迎合、实事求是百分百努力解决需求】的死指令。遇到难缠的乱码或奇怪的日文翻译，请直接扔给它处理。")
-    
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-
+    if "messages" not in st.session_state: st.session_state.messages = []
     for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+        with st.chat_message(msg["role"]): st.markdown(msg["content"])
 
-    if prompt := st.chat_input("请在此粘贴需要重新精翻的文本，或提出您的具体需求..."):
-        clean_api_key = api_key_input.strip()
-        
+    if prompt := st.chat_input("粘贴需求，AI 绝不偷懒..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-            
-        if not clean_api_key:
-            with st.chat_message("assistant"):
-                st.error("请先在左侧栏输入 Gemini API Key，我才能介入解决您的问题。")
+        with st.chat_message("user"): st.markdown(prompt)
+        
+        if not api_key_input.strip(): st.error("请输入 API Key。")
         else:
             with st.chat_message("assistant"):
-                with st.spinner("AI 正在认真解析并执行您的需求..."):
-                    try:
-                        client = genai.Client(api_key=clean_api_key)
-                        
-                        chat_sys_inst = """你是一个专门帮助用户解决具体需求的技术与语言助手。
-【你的最高准则】：
-1. 实事求是，百分百努力：绝不偷懒，绝不只做表面功夫迎合用户。遇到任务必须提供最直接、最完整的解决方案。
-2. 绝对精准严谨：绝不允许产生幻觉或胡编乱造，绝不要不懂装懂。
-3. 结合上下文纠错：若用户输入的是语音识别误听的日语/乱码文本，请优先推断真实上下文语义并提供流畅正宗的翻译，避免硬翻乱码。
-4. 务实答复：直奔主题解决用户当前提出的问题。"""
-                        
-                        chat_response = generate_with_retry(
-                            client=client,
-                            model=model_choice,
-                            contents=prompt,
-                            config=types.GenerateContentConfig(
-                                temperature=0.1,
-                                system_instruction=chat_sys_inst,
-                                max_output_tokens=8192
-                            )
-                        )
-                        st.markdown(chat_response.text)
-                        st.session_state.messages.append({"role": "assistant", "content": chat_response.text})
-                    except Exception as e:
-                        st.error(f"API 请求失败，未能完成任务: {e}")
+                try:
+                    client = genai.Client(api_key=api_key_input.strip())
+                    sys_inst = "务实、落地、100%努力解决问题，绝不幻觉，绝不偷懒。"
+                    res = generate_with_fallback(
+                        client, model_choice, prompt,
+                        types.GenerateContentConfig(temperature=0.1, system_instruction=sys_inst, max_output_tokens=8192)
+                    )
+                    st.markdown(res.text)
+                    st.session_state.messages.append({"role": "assistant", "content": res.text})
+                except Exception as e: st.error(f"失败: {e}")
