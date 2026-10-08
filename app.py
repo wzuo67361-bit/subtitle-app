@@ -31,36 +31,35 @@ api_key_input = st.sidebar.text_input(
     help="【必填】用于驱动各项功能的高精度处理。"
 )
 
-# 2026 官方推荐 Gemini API 标准模型列表，供用户手动首选
+# 仅保留标准的 3.x Flash 系列模型（移除所有轻量版）
 model_options = [
-    "gemini-3.8-flash",       # 【官方推荐】旗舰级高精度与极速响应
+    "gemini-3.8-flash",  # 【旗舰首选】极速、高精度多模态
     "gemini-3.7-flash",
     "gemini-3.6-flash",
-    "gemini-3.5-flash",
-    "gemini-3.5-flash-lite",
-    "gemini-3.5-transcribe",
+    "gemini-3.5-flash",  # 【高稳配额】抗拥堵能力强
 ]
 model_choice = st.sidebar.selectbox("2. 手动选择首选 Gemini 模型", model_options, index=0)
 
 target_language = st.sidebar.selectbox("3. 全局目标语言", ["简体中文", "繁体中文", "English"], index=0)
 whisper_size = st.sidebar.selectbox("4. Whisper 音频识别精度", ["tiny", "base", "small", "medium"], index=1)
-hf_token = st.sidebar.text_input("5. HuggingFace Token (可选)", type="password")
+hf_token = st.sidebar.text_input("5. HuggingFace Token (精准区分说话人可选)", type="password")
 
 # ================= 辅助函数与降级逻辑 =================
 @st.cache_resource
 def load_whisper_model(size):
     return WhisperModel(size, device="cpu", compute_type="int8")
 
-def generate_with_fallback(client, primary_model, contents, config, max_retries=3):
+def generate_with_fallback(client, primary_model, contents, config, max_retries=2):
     """
-    智能重试 + 404/503/429 自动无缝降级机制：
-    不仅返回 response，还会同时返回【最终实际调用的模型名称】，确保向用户 100% 透明。
+    智能重试 + 降级机制：
+    仅在用户选中的 3.x Flash 模型队列中降级，确保不混入轻量版模型导致翻译质量下滑。
     """
     fallback_queue = [
         primary_model,
         "gemini-3.8-flash",
-        "gemini-3.5-flash",
-        "gemini-3.5-flash-lite"
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash"
     ]
     seen = set()
     ordered_models = [m for m in fallback_queue if m not in seen and not seen.add(m)]
@@ -70,17 +69,15 @@ def generate_with_fallback(client, primary_model, contents, config, max_retries=
         for attempt in range(max_retries):
             try:
                 response = client.models.generate_content(model=m_name, contents=contents, config=config)
-                # 成功后，返回结果的同时，告知上层是哪个模型成功的
                 return response, m_name
             except Exception as e:
                 err_str = str(e)
                 last_exception = e
-                # 若模型不可用 (404/NOT_FOUND)，不再尝试该模型，直接跳出并切换下一个模型
                 if "404" in err_str or "NOT_FOUND" in err_str:
-                    st.toast(f"⚠️ 模型 `{m_name}` 在 API 端已不可用，正在切至备用模型...", icon="🔄")
+                    st.toast(f"⚠️ 模型 `{m_name}` 暂不可用，切至同级别备用模型...", icon="🔄")
                     break
                 elif any(err in err_str for err in ["503", "UNAVAILABLE", "429", "ResourceExhausted"]):
-                    time.sleep((attempt + 1) * 2)
+                    time.sleep(1.5)
                 else:
                     break
     raise last_exception
@@ -112,36 +109,67 @@ with tab1:
                 tfile.close()
                 st.audio(tfile.name)
                 
+                speaker_segments = []
+                # 仅在提供真实 Token 时进行真实的声纹分离，杜绝盲目交替猜测
+                if DIARIZATION_AVAILABLE and hf_token.strip():
+                    with st.spinner("正在分析音频真实说话人声纹特征..."):
+                        try:
+                            diarization_pipeline = Pipeline.from_pretrained(
+                                "pyannote/speaker-diarization-3.1",
+                                use_auth_token=hf_token.strip()
+                            )
+                            diarization = diarization_pipeline(tfile.name)
+                            for turn, _, speaker in diarization.itertracks(yield_label=True):
+                                speaker_segments.append((turn.start, turn.end, speaker))
+                        except Exception as diar_err:
+                            st.warning(f"声纹分离接口提醒：{diar_err}，将切至精准文本上下文判别模式。")
+
                 with st.spinner("正在高精度提取音频原文..."):
                     model = load_whisper_model(whisper_size)
                     segments, _ = model.transcribe(tfile.name, beam_size=5, vad_filter=True)
                     srt_blocks = []
+                    
+                    speaker_id_map = {}
+                    
                     for i, segment in enumerate(list(segments), start=1):
+                        seg_start, seg_end = segment.start, segment.end
+                        text = segment.text.strip()
+                        speaker_label = ""
+                        
+                        # 严格依据声纹轨迹分配说话人（如：[说话人A]、[说话人B]），绝不凭空造假男女
+                        if speaker_segments:
+                            for (d_start, d_end, spk) in speaker_segments:
+                                if max(seg_start, d_start) < min(seg_end, d_end):
+                                    if spk not in speaker_id_map:
+                                        speaker_id_map[spk] = f"[说话人 {chr(65 + len(speaker_id_map))}]"
+                                    speaker_label = speaker_id_map[spk] + " "
+                                    break
+                        
                         def fmt(secs):
                             h, m, s, ms = int(secs//3600), int((secs%3600)//60), int(secs%60), int((secs%1)*1000)
                             return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
-                        srt_blocks.append(f"{i}\n{fmt(segment.start)} --> {fmt(segment.end)}\n{segment.text.strip()}")
+                        
+                        srt_blocks.append(f"{i}\n{fmt(seg_start)} --> {fmt(seg_end)}\n{speaker_label}{text}")
                 
                 if not srt_blocks:
                     st.warning("未检测到有效人声。")
                     st.stop()
 
-                sys_inst = f"""你是一个顶级的双语字幕翻译与校解专家。
-【铁律】：
-1. 原文可能由语音识别产生误听乱码，必须优先推断实际含义再精准翻译，绝禁按字面死翻！
-2. 遇到完全无逻辑的乱码，标注'[听误]'。
-3. 输出纯 SRT 格式：序号、时间轴、原文、{target_language}翻译。绝无废话。"""
+                sys_inst = f"""你是一个极其严谨的视听双语字幕翻译与精校专家。
+【说话人与翻译绝对铁律】：
+1. 绝对禁止凭空胡编乱造说话人性别！若字幕带如 [说话人 A]、[说话人 B] 等标记，请严格予以保留，或结合对话真实语义逻辑精准区分说话人，绝不可瞎编[男]/[女]标签。
+2. 原文可能由 ASR（语音识别）产生误听乱码（如听错的片假名词汇、同音错字），必须优先结合上下文逻辑推断实际含义后再进行精准翻译，绝对禁止按字面乱码僵硬死翻！
+3. 遇到完全无逻辑的乱码段落，请标注'[听误]'。
+4. 输出纯净 SRT 格式：序号、时间轴、原文、{target_language}翻译。绝不输出任何 Markdown 解释与前言。"""
                 
-                with st.spinner(f"请求 {model_choice} 生成双语字幕中..."):
+                with st.spinner(f"请求 {model_choice} 进行高精度双语翻译中..."):
                     client = genai.Client(api_key=clean_api_key)
-                    # 接收双返回值：响应体 + 实际运行的模型
                     response, actual_model = generate_with_fallback(
                         client, model_choice, f"翻译字幕：\n\n{chr(10).join(srt_blocks)}", 
                         types.GenerateContentConfig(temperature=0.0, system_instruction=sys_inst, max_output_tokens=8192)
                     )
                     complete_result = clean_markdown_text(response.text)
-                    # UI 层面明确展示实际生效模型
-                    st.success(f"🎉 处理完成！(本次翻译实际由 `{actual_model}` 驱动)")
+                    st.success(f"🎉 处理完成！(实际驱动模型: `{actual_model}`)")
                     st.text_area("精校字幕", complete_result, height=300)
                     st.download_button("📥 下载字幕 .srt", complete_result, "bilingual.srt", "primary")
             except Exception as e:
@@ -163,13 +191,11 @@ with tab2:
                 image = Image.open(img_file)
                 st.image(image, use_container_width=True)
                 with st.spinner("读取并翻译中..."):
-                    # 接收实际模型
                     res, actual_model = generate_with_fallback(
                         client, model_choice, [image, f"提取图片文字并精准翻译为{target_language}，不幻觉捏造。"],
                         types.GenerateContentConfig(temperature=0.1, max_output_tokens=8192)
                     )
-                    # UI 明确显示
-                    st.success(f"✅ 图片翻译完成！(由 `{actual_model}` 提供算力)")
+                    st.success(f"✅ 图片翻译完成！(由 `{actual_model}` 驱动)")
                     st.write(res.text)
             except Exception as e: st.error(f"失败: {e}")
 
@@ -212,7 +238,6 @@ with tab3:
                     prompt_content += f" 用户的附加要求是：{user_hint}"
 
                 with st.spinner(f"AI 正在严谨提取数据，首选模型 {model_choice}..."):
-                    # 接收双返回值
                     response, actual_model = generate_with_fallback(
                         client=client,
                         primary_model=model_choice,
@@ -231,7 +256,6 @@ with tab3:
                         df = pd.read_csv(io.StringIO(csv_data))
                         
                         with col2:
-                            # 醒目提示实际输出的模型
                             st.success(f"✅ 提取完毕！确认排版与数据一致。(实际处理模型: `{actual_model}`)")
                             st.dataframe(df, use_container_width=True, height=400)
                             
@@ -260,7 +284,6 @@ with tab4:
     st.subheader("🤖 严谨务实的 AI 答疑与技术助手")
     if "messages" not in st.session_state: st.session_state.messages = []
     
-    # 渲染历史消息，并带上模型水印（若有）
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]): 
             st.markdown(msg["content"])
@@ -279,7 +302,6 @@ with tab4:
                     client = genai.Client(api_key=clean_api_key)
                     sys_inst = "务实、落地、100%努力解决问题，绝不幻觉，绝不偷懒。"
                     
-                    # 获取实际调用的模型名称
                     res, actual_model = generate_with_fallback(
                         client, model_choice, prompt,
                         types.GenerateContentConfig(temperature=0.1, system_instruction=sys_inst, max_output_tokens=8192)
@@ -287,7 +309,6 @@ with tab4:
                     
                     st.markdown(res.text)
                     st.caption(f"✨ 由 `{actual_model}` 生成")
-                    # 把实际模型名称也存入聊天历史记录中
                     st.session_state.messages.append({
                         "role": "assistant", 
                         "content": res.text,
